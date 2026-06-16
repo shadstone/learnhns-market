@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block title %}How LearnHNS Market Works{% endblock %}
+{% block meta_description %}Learn how LearnHNS Market lets people buy and sell Handshake names with Shakedex proofs, Bob LearnHNS, and non-custodial settlement instead of a centralized marketplace account.{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-8">
+    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
+        <p class="text-sm uppercase tracking-wide text-indigo-600 font-semibold mb-2">How it works</p>
+        <h1 class="text-4xl font-bold text-gray-900">A Shakedex-powered market for Handshake names</h1>
+        <p class="mt-4 text-lg text-gray-700">
+            LearnHNS Market is a public place to discover Handshake names for sale. The important difference is that the name trade is built around Shakedex proofs and wallet-signed transactions, not a marketplace account holding the seller's names or the buyer's funds.
+        </p>
+        <div class="mt-6 flex flex-wrap gap-3">
+            <a href="{{ url_for('main.index') }}" class="rounded bg-indigo-600 px-4 py-2 font-semibold text-white hover:bg-indigo-700">Browse listings</a>
+            <a href="https://shakedex.org/markets" target="_blank" rel="noopener noreferrer" class="rounded border border-indigo-200 px-4 py-2 font-semibold text-indigo-700 hover:bg-indigo-50">Learn about Shakedex channels</a>
+        </div>
+    </section>
+
+    <section class="grid gap-5 md:grid-cols-3">
+        <div class="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+            <p class="text-sm font-semibold uppercase tracking-wide text-gray-500">1. Seller</p>
+            <h2 class="mt-2 text-xl font-bold text-gray-900">Locks the name for sale</h2>
+            <p class="mt-3 text-gray-700">
+                The seller uses Bob LearnHNS or compatible Shakedex tooling to move the name into a Shakedex sale state and create a signed proof for the price they want.
+            </p>
+        </div>
+        <div class="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+            <p class="text-sm font-semibold uppercase tracking-wide text-gray-500">2. Market</p>
+            <h2 class="mt-2 text-xl font-bold text-gray-900">Lists the proof</h2>
+            <p class="mt-3 text-gray-700">
+                LearnHNS Market validates and displays that proof so buyers can inspect the name, price, expiration window, and sale status before opening their wallet.
+            </p>
+        </div>
+        <div class="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+            <p class="text-sm font-semibold uppercase tracking-wide text-gray-500">3. Buyer</p>
+            <h2 class="mt-2 text-xl font-bold text-gray-900">Fills with a wallet</h2>
+            <p class="mt-3 text-gray-700">
+                The buyer completes the purchase in Bob LearnHNS or another compatible wallet. The wallet builds and broadcasts the transaction; the market never asks for a seed phrase.
+            </p>
+        </div>
+    </section>
+
+    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
+        <h2 class="text-2xl font-bold text-gray-900">What belongs here versus Shakedex</h2>
+        <div class="mt-5 grid gap-5 md:grid-cols-2">
+            <div class="rounded-md border border-gray-200 bg-gray-50 p-5">
+                <h3 class="font-semibold text-gray-900">LearnHNS Market</h3>
+                <ul class="mt-3 list-disc pl-5 space-y-2 text-gray-700">
+                    <li>Human-friendly listing pages for reviewers, buyers, and sellers.</li>
+                    <li>Public discovery for active, pending, and sold names.</li>
+                    <li>Bob LearnHNS wallet links, marketplace status, and buyer guidance.</li>
+                    <li>Hosted channel APIs that compatible wallets can read.</li>
+                </ul>
+            </div>
+            <div class="rounded-md border border-gray-200 bg-gray-50 p-5">
+                <h3 class="font-semibold text-gray-900">Shakedex</h3>
+                <ul class="mt-3 list-disc pl-5 space-y-2 text-gray-700">
+                    <li>The protocol and proof model behind the sale flow.</li>
+                    <li>Reference concepts for channels, proofs, and decentralized name swaps.</li>
+                    <li>The right place for deeper technical background and independent market operators.</li>
+                    <li><a href="https://shakedex.org/" target="_blank" rel="noopener noreferrer" class="font-medium text-indigo-600 hover:underline">Visit shakedex.org</a> for the broader Shakedex project.</li>
+                </ul>
+            </div>
+        </div>
+        <p class="mt-5 text-gray-700">
+            In plain English: LearnHNS Market is one Shakedex channel with a friendlier storefront. Shakedex is the underlying decentralized exchange design that other channels can also use.
+        </p>
+    </section>
+
+    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
+        <h2 class="text-2xl font-bold text-gray-900">How this compares to old Namebase</h2>
+        <p class="mt-3 text-gray-700">
+            Many Handshake users first bought and sold names through Namebase. That experience was familiar because it felt like a normal centralized marketplace: log in, list a name, buy a name, and let the platform coordinate the rest.
+        </p>
+        <div class="mt-5 overflow-hidden rounded-md border border-gray-200">
+            <div class="grid bg-gray-100 text-sm font-semibold text-gray-700 md:grid-cols-3">
+                <div class="p-4">Question</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">Old centralized marketplace model</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">LearnHNS Market model</div>
+            </div>
+            <div class="grid border-t border-gray-200 text-gray-700 md:grid-cols-3">
+                <div class="p-4 font-semibold text-gray-900">Who holds the name?</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">The platform experience often felt account-centered and custodial.</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">The seller prepares a Shakedex proof; settlement happens through Handshake transactions.</div>
+            </div>
+            <div class="grid border-t border-gray-200 text-gray-700 md:grid-cols-3">
+                <div class="p-4 font-semibold text-gray-900">Who approves the buy?</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">The buyer used the marketplace account flow.</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">The buyer's wallet signs and broadcasts the purchase.</div>
+            </div>
+            <div class="grid border-t border-gray-200 text-gray-700 md:grid-cols-3">
+                <div class="p-4 font-semibold text-gray-900">What does the market provide?</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">A centralized listing, account, custody, and settlement experience.</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">Discovery, proof validation, wallet links, status, and optional helper data for light wallets.</div>
+            </div>
+            <div class="grid border-t border-gray-200 text-gray-700 md:grid-cols-3">
+                <div class="p-4 font-semibold text-gray-900">What changes for users?</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">Simpler mental model, more reliance on the platform.</div>
+                <div class="border-t border-gray-200 p-4 md:border-l md:border-t-0">More wallet involvement, less platform custody. The interface is being polished to make that feel normal.</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="grid gap-5 md:grid-cols-2">
+        <div class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
+            <h2 class="text-2xl font-bold text-gray-900">For buyers</h2>
+            <ol class="mt-4 list-decimal pl-5 space-y-3 text-gray-700">
+                <li>Browse active or pending names on LearnHNS Market.</li>
+                <li>Open a listing and check the price, status, expiration, and proof details.</li>
+                <li>Use Bob LearnHNS or a compatible wallet to fill the proof.</li>
+                <li>Wait for the normal Handshake transfer period before final ownership is complete.</li>
+            </ol>
+            <p class="mt-5 rounded-md border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">
+                LearnHNS Market can help wallets with listing data, but the wallet owner still approves the transaction.
+            </p>
+        </div>
+        <div class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
+            <h2 class="text-2xl font-bold text-gray-900">For sellers</h2>
+            <ol class="mt-4 list-decimal pl-5 space-y-3 text-gray-700">
+                <li>Create a Shakedex listing from a name you control.</li>
+                <li>Submit the proof to LearnHNS Market when it is ready.</li>
+                <li>Keep your local proof and wallet records backed up.</li>
+                <li>After a buyer fills the listing, track the sale and transfer status on the market.</li>
+            </ol>
+            <p class="mt-5 text-sm text-gray-600">
+                Seller tooling is moving toward Bob LearnHNS so normal users do not need command-line steps.
+            </p>
+        </div>
+    </section>
+
+    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
+        <h2 class="text-2xl font-bold text-gray-900">The trust model, simply</h2>
+        <div class="mt-5 grid gap-4 md:grid-cols-2">
+            <div class="rounded-md border border-green-200 bg-green-50 p-5 text-green-900">
+                <h3 class="font-semibold">What the market should do</h3>
+                <ul class="mt-3 list-disc pl-5 space-y-2">
+                    <li>Show public listing information clearly.</li>
+                    <li>Validate proofs before listing them.</li>
+                    <li>Expose status and helper APIs for compatible wallets.</li>
+                    <li>Link users into wallet-confirmed purchase flows.</li>
+                </ul>
+            </div>
+            <div class="rounded-md border border-red-200 bg-red-50 p-5 text-red-900">
+                <h3 class="font-semibold">What the market should never need</h3>
+                <ul class="mt-3 list-disc pl-5 space-y-2">
+                    <li>Your seed phrase or private keys.</li>
+                    <li>Custody of buyer funds.</li>
+                    <li>A password for your wallet.</li>
+                    <li>Blind trust that a listing is valid without wallet verification.</li>
+                </ul>
+            </div>
+        </div>
+        <div class="mt-6 flex flex-wrap gap-3">
+            <a href="{{ url_for('main.status') }}" class="rounded border border-gray-300 px-4 py-2 font-semibold text-gray-700 hover:bg-gray-50">View market status</a>
+            <a href="{{ url_for('main.docs') }}" class="rounded border border-gray-300 px-4 py-2 font-semibold text-gray-700 hover:bg-gray-50">Read technical docs</a>
+        </div>
+    </section>
+</div>
+{% endblock %}

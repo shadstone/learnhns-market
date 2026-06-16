@@ -114,6 +114,11 @@ def docs():
     return render_template('docs.html')
 
 
+@main_bp.route('/how-it-works')
+def how_it_works():
+    return render_template('how_it_works.html')
+
+
 @main_bp.route('/admin')
 def admin():
     if not _has_admin_page_access():
@@ -146,6 +151,7 @@ def sitemap_xml():
         (url_for('main.sold'), 'hourly', '0.8'),
         (url_for('main.pending'), 'hourly', '0.8'),
         (url_for('main.stats'), 'hourly', '0.8'),
+        (url_for('main.how_it_works'), 'monthly', '0.6'),
         (url_for('main.docs'), 'monthly', '0.5'),
         (url_for('main.status'), 'daily', '0.4'),
         (url_for('main.llms_txt'), 'weekly', '0.4'),
@@ -482,6 +488,7 @@ LearnHNS Market is a public Shakedex channel for fixed-price Handshake name list
 
 Canonical site: https://market.learnhns.com/
 Browse listings: https://market.learnhns.com/
+How it works: https://market.learnhns.com/how-it-works
 Sale history: https://market.learnhns.com/sold
 Pending listings: https://market.learnhns.com/pending
 Human login: https://market.learnhns.com/login
@@ -509,6 +516,7 @@ Use this skill when an AI agent needs to inspect, explain, or help a human use L
 ## Public URLs
 
 - Browse: https://market.learnhns.com/
+- How it works: https://market.learnhns.com/how-it-works
 - Sold history: https://market.learnhns.com/sold
 - Pending listings: https://market.learnhns.com/pending
 - Docs: https://market.learnhns.com/docs
