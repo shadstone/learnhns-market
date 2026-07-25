@@ -261,6 +261,7 @@ Additional live checks:
 - `/pending`: 0.50-second TTFB
 - `/stats`: 0.46-second TTFB
 - `/sold`: 0.71-second TTFB
+- `/api/v2/pending-listings`: 0.53-second TTFB with 22 rows and no live row refresh
 - Anonymous browse responses: `public, max-age=15, s-maxage=30, stale-while-revalidate=60`
 - Requests carrying an account cookie: `private, no-store`
 - Versioned static assets: `public, max-age=31536000, immutable`
@@ -331,3 +332,4 @@ A Codex heartbeat named `LearnHNS market 24h health watch` checks health and hom
 | 2026-07-25 | Completed indexer catch-up and production load test | Zero block lag; 100 requests at concurrency 10 with zero failures and 647 ms p95 TTFB |
 | 2026-07-25 | Started hourly 24-run health observation | Automation `learnhns-market-24h-health-watch` active |
 | 2026-07-25 | Captured Railway complaint-window and early post-deployment resource metrics | Web CPU down 71.7% and HSD CPU down 97.7%; final cost conclusion deferred until the observation window completes |
+| 2026-07-25 | Audited all read-only listing feeds and removed the remaining live refresh from `/api/v2/pending-listings` | Container tests now assert that browse feeds make no transaction, name, or chain calls; production feed TTFB is 0.53 seconds |
