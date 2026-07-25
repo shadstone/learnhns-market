@@ -267,6 +267,21 @@ Additional live checks:
 - Tailwind is served as a compiled 26,600-byte stylesheet.
 - Pagination, full-dataset search, status filtering, and price sorting returned HTTP 200 in production.
 
+### Railway resource and cost evidence
+
+Railway service metrics provide the infrastructure baseline. The before window is the 2026-07-24 complaint period from 09:00:00–11:46:40 UTC. The first post-deployment sample is from 2026-07-25 after 03:08 UTC.
+
+| Service and metric | Before | Early after | Change |
+| --- | ---: | ---: | ---: |
+| Web CPU average | 0.0907 vCPU | 0.0257 vCPU | -71.7% |
+| Web memory average | 186.5 MB | 174.9 MB | -6.2% |
+| HSD CPU average | 0.0248 vCPU | 0.00057 vCPU | -97.7% |
+| HSD memory average | 2,898.7 MB | 3,157.8 MB | +8.9% |
+| Indexer CPU average | 0 vCPU because the worker was stopped | 0.00009 vCPU | Worker restored at negligible steady CPU |
+| Indexer memory average | 0 MB because the worker was stopped | 89.6 MB | Cost of restored continuous indexing |
+
+The early sample supports the expected CPU reduction from removing hundreds of request-time HSD calls. It is not yet a final monthly-cost estimate: the post-deployment interval is short, contains the production load test, and HSD memory varies independently of web request handling. The final comparison will use the complete observation window and Railway's current per-minute CPU and memory pricing.
+
 ## Monitoring and recovery
 
 Public health check:
@@ -315,3 +330,4 @@ A Codex heartbeat named `LearnHNS market 24h health watch` checks health and hom
 | 2026-07-25 | Deployed the repaired indexer and optimized web application to Railway | Homepage TTFB reduced to 0.40–0.58 seconds; indexer catch-up in progress |
 | 2026-07-25 | Completed indexer catch-up and production load test | Zero block lag; 100 requests at concurrency 10 with zero failures and 647 ms p95 TTFB |
 | 2026-07-25 | Started hourly 24-run health observation | Automation `learnhns-market-24h-health-watch` active |
+| 2026-07-25 | Captured Railway complaint-window and early post-deployment resource metrics | Web CPU down 71.7% and HSD CPU down 97.7%; final cost conclusion deferred until the observation window completes |
