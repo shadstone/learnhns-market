@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 
 from app.models import (
@@ -18,6 +19,7 @@ from app.blueprints.api import (
 
 
 MARKETPLACE_COVENANT_ACTIONS = {'TRANSFER', 'FINALIZE'}
+HANDSHAKE_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,62}$')
 NAME_RELEVANT_COVENANT_TYPES = {
     9: 'TRANSFER',
     10: 'FINALIZE',
@@ -28,7 +30,7 @@ def normalize_name(value):
     if not isinstance(value, str):
         return None
     name = value.strip().lower().rstrip('/')
-    return name or None
+    return name if HANDSHAKE_NAME_RE.fullmatch(name) else None
 
 
 def covenant_action(covenant):
@@ -390,6 +392,16 @@ def progress_for(network='main'):
     return progress
 
 
+def mark_progress_failed(error, network='main'):
+    db.session.rollback()
+    progress = progress_for(network)
+    progress.status = 'failed'
+    progress.last_error = str(error)
+    progress.updated_at = datetime.utcnow()
+    db.session.commit()
+    return progress
+
+
 def scan_market_blocks(start_height=None, end_height=None, lookback=720, network='main', max_blocks=720):
     chain_height = get_chain_height()
     progress = progress_for(network)
@@ -397,7 +409,22 @@ def scan_market_blocks(start_height=None, end_height=None, lookback=720, network
 
     if start_height is not None:
         start = start_height
-    elif isinstance(progress.last_indexed_height, int) and progress.last_indexed_height < end:
+    elif isinstance(progress.last_indexed_height, int):
+        if progress.last_indexed_height >= end:
+            now = datetime.utcnow()
+            progress.status = 'watching'
+            progress.target_height = end
+            progress.finished_at = now
+            progress.updated_at = now
+            progress.last_error = None
+            db.session.commit()
+            return {
+                'blocksProcessed': 0,
+                'eventsIndexed': 0,
+                'startHeight': None,
+                'endHeight': end,
+                'observedNames': 0,
+            }
         start = progress.last_indexed_height + 1
     else:
         start = max(0, end - lookback)
@@ -446,12 +473,7 @@ def scan_market_blocks(start_height=None, end_height=None, lookback=720, network
         progress.updated_at = datetime.utcnow()
         db.session.commit()
     except Exception as exc:
-        db.session.rollback()
-        progress = progress_for(network)
-        progress.status = 'failed'
-        progress.last_error = str(exc)
-        progress.updated_at = datetime.utcnow()
-        db.session.commit()
+        mark_progress_failed(exc, network=network)
         raise
 
     return {
@@ -469,6 +491,21 @@ def index_listing_hashes(network='main'):
         for value in (listing.transfer_start_tx_hash, listing.sale_tx_hash):
             if isinstance(value, str) and len(value) == 64:
                 hashes.add(value.lower())
+
+    if hashes:
+        indexed_hashes = {
+            row[0]
+            for row in (
+                db.session.query(MarketplaceCovenantEvent.tx_hash)
+                .filter(
+                    MarketplaceCovenantEvent.network == network,
+                    MarketplaceCovenantEvent.tx_hash.in_(hashes),
+                )
+                .distinct()
+                .all()
+            )
+        }
+        hashes.difference_update(indexed_hashes)
 
     results = []
     for tx_hash_value in sorted(hashes):

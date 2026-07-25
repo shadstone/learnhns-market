@@ -4,11 +4,12 @@ import json
 import os
 import sys
 import time
+import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app import create_app
-from app.marketplace_indexer import index_listing_hashes, scan_market_blocks
+from app.marketplace_indexer import index_listing_hashes, mark_progress_failed, scan_market_blocks
 
 
 def main():
@@ -18,26 +19,52 @@ def main():
     parser.add_argument("--start-height", type=int)
     parser.add_argument("--end-height", type=int)
     parser.add_argument("--poll-seconds", type=int, default=60)
+    parser.add_argument("--hash-refresh-seconds", type=int, default=3600)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
     app = create_app()
     with app.app_context():
+        next_hash_refresh_at = 0
         while True:
-            hash_results = index_listing_hashes()
-            block_result = scan_market_blocks(
-                start_height=args.start_height,
-                end_height=args.end_height,
-                lookback=args.lookback,
-                max_blocks=args.max_blocks,
-            )
-            print(json.dumps({
-                "success": True,
-                "hashes": hash_results,
-                "blocks": block_result,
-            }, indent=2, sort_keys=True))
+            cycle_error = None
+            try:
+                now = time.monotonic()
+                hash_results = []
+                if now >= next_hash_refresh_at:
+                    hash_results = index_listing_hashes()
+                    next_hash_refresh_at = now + max(args.hash_refresh_seconds, args.poll_seconds)
+                block_result = scan_market_blocks(
+                    start_height=args.start_height,
+                    end_height=args.end_height,
+                    lookback=args.lookback,
+                    max_blocks=args.max_blocks,
+                )
+                print(json.dumps({
+                    "success": True,
+                    "hashes": {
+                        "checked": len(hash_results),
+                        "eventsIndexed": sum(result.get("indexed", 0) for result in hash_results),
+                        "errors": [
+                            result
+                            for result in hash_results
+                            if result.get("error")
+                        ],
+                    },
+                    "blocks": block_result,
+                }, indent=2, sort_keys=True), flush=True)
+            except Exception as exc:
+                cycle_error = exc
+                mark_progress_failed(exc)
+                print(json.dumps({
+                    "success": False,
+                    "error": str(exc),
+                }, sort_keys=True), file=sys.stderr, flush=True)
+                traceback.print_exc()
 
             if args.once:
+                if cycle_error:
+                    raise cycle_error
                 break
 
             args.start_height = None

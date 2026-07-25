@@ -1,4 +1,5 @@
 import json
+import math
 from datetime import datetime, timedelta
 from decimal import Decimal
 from urllib.parse import quote
@@ -6,6 +7,7 @@ from xml.sax.saxutils import escape
 
 from flask import Blueprint, Response, current_app, make_response, jsonify, redirect, render_template, request, url_for
 from app.blueprints.api import get_hsd_status_payload
+from app.blueprints.api import _active_listing_for_name
 from app.blueprints.api import _active_listings_unique_by_name
 from app.blueprints.api import _fetch_explorer_tx
 from app.blueprints.api import _fetch_hsd_tx
@@ -25,8 +27,6 @@ main_bp = Blueprint('main', __name__)
 
 @main_bp.route('/')
 def index():
-    query = request.args.get('q', '')
-    min_price = request.args.get('min_price')
     listings = _active_listings_unique_by_name()
     active_names = {listing.name for listing in listings}
     pending_listings = [
@@ -38,13 +38,159 @@ def index():
     watcher_counts = watcher_counts_for_names(
         [listing.name for listing in listings] + [pending.name for pending in pending_listings]
     )
+    listings, pending_listings, pagination = _paginated_market_rows(
+        listings,
+        pending_listings,
+        watcher_counts,
+    )
     return render_template(
         'index.html',
         listings=listings,
-        pending_listings=[_pending_listing_payload(pending) for pending in pending_listings],
+        pending_listings=[_pending_listing_payload(pending, refresh=False) for pending in pending_listings],
         watcher_counts=watcher_counts,
         hsd_readiness=_hsd_readiness(),
+        pagination=pagination,
     )
+
+
+def _paginated_market_rows(listings, pending_listings, watcher_counts, per_page=48):
+    rows = []
+    for listing in listings:
+        rows.append({
+            'kind': 'available',
+            'record': listing,
+            'name': listing.name,
+            'price': Decimal(listing.price_hns),
+            'created': listing.created_at or datetime.min,
+        })
+    for pending in pending_listings:
+        rows.append({
+            'kind': 'pending',
+            'record': pending,
+            'name': pending.name,
+            'price': (
+                Decimal(pending.expected_price) / Decimal(1_000_000)
+                if pending.expected_price is not None
+                else None
+            ),
+            'created': pending.created_at or datetime.min,
+        })
+
+    query = request.args.get('q', '').strip().lower()
+    status = request.args.get('status', 'all')
+    punycode = request.args.get('punycode', 'all')
+    min_price = _optional_decimal_arg('min')
+    max_price = _optional_decimal_arg('max')
+    min_chars = _optional_int_arg('min_chars')
+    max_chars = _optional_int_arg('max_chars')
+
+    def matches(row):
+        name = row['name'].lower()
+        if query and query not in name and query not in _decoded_market_name(name).lower():
+            return False
+        if status in {'available', 'pending'} and row['kind'] != status:
+            return False
+        if min_price is not None and (row['price'] is None or row['price'] < min_price):
+            return False
+        if max_price is not None and (row['price'] is None or row['price'] > max_price):
+            return False
+        if min_chars is not None and len(name) < min_chars:
+            return False
+        if max_chars is not None and len(name) > max_chars:
+            return False
+        is_punycode = name.startswith('xn--')
+        if punycode == 'only' and not is_punycode:
+            return False
+        if punycode == 'hide' and is_punycode:
+            return False
+        return True
+
+    rows = [row for row in rows if matches(row)]
+    sort = request.args.get('sort', 'newest')
+    if sort == 'watchers-desc':
+        rows.sort(key=lambda row: (
+            -watcher_counts.get(row['name'], 0),
+            -_datetime_sort_value(row['created']),
+            row['name'],
+        ))
+    elif sort == 'price-asc':
+        rows.sort(key=lambda row: (row['price'] is None, row['price'] or Decimal(0), row['name']))
+    elif sort == 'price-desc':
+        rows.sort(key=lambda row: (row['price'] is None, -(row['price'] or Decimal(0)), row['name']))
+    elif sort == 'length-asc':
+        rows.sort(key=lambda row: (len(row['name']), row['name']))
+    elif sort == 'length-desc':
+        rows.sort(key=lambda row: (-len(row['name']), row['name']))
+    elif sort == 'name-asc':
+        rows.sort(key=lambda row: row['name'])
+    else:
+        rows.sort(key=lambda row: (row['created'], row['name']), reverse=True)
+
+    total = len(rows)
+    pages = max(1, math.ceil(total / per_page))
+    page = min(max(_optional_int_arg('page') or 1, 1), pages)
+    start = (page - 1) * per_page
+    page_rows = rows[start:start + per_page]
+    page_listings = [row['record'] for row in page_rows if row['kind'] == 'available']
+    page_pending = [row['record'] for row in page_rows if row['kind'] == 'pending']
+
+    return page_listings, page_pending, {
+        'page': page,
+        'pages': pages,
+        'per_page': per_page,
+        'total': total,
+        'first': start + 1 if total else 0,
+        'last': min(start + per_page, total),
+        'previous_url': _market_page_url(page - 1) if page > 1 else None,
+        'next_url': _market_page_url(page + 1) if page < pages else None,
+    }
+
+
+def _optional_decimal_arg(name):
+    value = request.args.get(name, '').strip()
+    if not value:
+        return None
+    try:
+        return Decimal(value)
+    except (ValueError, ArithmeticError):
+        return None
+
+
+def _optional_int_arg(name):
+    value = request.args.get(name, '').strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _decoded_market_name(name):
+    if not name.startswith('xn--'):
+        return name
+    try:
+        return name.encode('ascii').decode('idna')
+    except UnicodeError:
+        return name
+
+
+def _datetime_sort_value(value):
+    return (
+        value.toordinal() * 86400
+        + value.hour * 3600
+        + value.minute * 60
+        + value.second
+    )
+
+
+def _market_page_url(page):
+    args = request.args.to_dict()
+    if page > 1:
+        args['page'] = page
+    else:
+        args.pop('page', None)
+    return url_for('main.index', **args)
 
 @main_bp.route('/sold')
 def sold():
@@ -57,8 +203,6 @@ def sold():
     )
     chain_height = _current_chain_height()
     for listing in listings:
-        if listing.status == 'sale-pending':
-            _resolve_sale_pending_listing(listing)
         listing.sale_transfer_status = _sale_transfer_status(
             listing,
             chain_height=chain_height,
@@ -81,7 +225,7 @@ def pending():
     ]
     return render_template(
         'pending_list.html',
-        pending_listings=[_pending_listing_payload(pending) for pending in pending_listings],
+        pending_listings=[_pending_listing_payload(pending, refresh=False) for pending in pending_listings],
     )
 
 
@@ -215,8 +359,7 @@ def status():
 def listing_detail(name):
     normalized_name = name.lower().rstrip('/')
     listing_history = _listing_history(normalized_name)
-    listing = _active_listings_unique_by_name()
-    listing = next((row for row in listing if row.name == normalized_name), None)
+    listing = _active_listing_for_name(normalized_name)
     if not listing:
         pending = (
             PendingListing.query
@@ -334,10 +477,7 @@ def listing_success(name):
 @main_bp.route('/listing/<name>/proof.json')
 def listing_proof(name):
     normalized_name = name.lower().rstrip('/')
-    listing = next(
-        (row for row in _active_listings_unique_by_name() if row.name == normalized_name),
-        None,
-    )
+    listing = _active_listing_for_name(normalized_name)
     if listing is None:
         return jsonify({"error": "Active listing not found"}), 404
     return jsonify(listing.proof_json)

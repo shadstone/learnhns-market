@@ -93,7 +93,7 @@
     </div>
 </div>
 
-<div id="market-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+<div id="market-grid" data-market-total="{{ pagination.total }}" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
     {% for listing in listings %}
     <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-100 hover:shadow-md transition"
          data-market-card
@@ -211,6 +211,22 @@
         <p class="mt-1 text-sm">Try a wider price range or include both pending and available names.</p>
     </div>
 </div>
+{% if pagination.pages > 1 %}
+<nav class="mt-8 flex flex-col items-center justify-between gap-3 rounded-lg border border-gray-100 bg-white px-5 py-4 text-sm sm:flex-row" aria-label="Marketplace pages">
+    <p class="text-gray-600">
+        Showing {{ pagination.first }}–{{ pagination.last }} of {{ pagination.total }} matching listings
+    </p>
+    <div class="flex items-center gap-3">
+        {% if pagination.previous_url %}
+        <a href="{{ pagination.previous_url }}" class="rounded border border-gray-300 px-4 py-2 font-semibold text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700">Previous</a>
+        {% endif %}
+        <span class="font-semibold text-gray-700">Page {{ pagination.page }} of {{ pagination.pages }}</span>
+        {% if pagination.next_url %}
+        <a href="{{ pagination.next_url }}" class="rounded border border-gray-300 px-4 py-2 font-semibold text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700">Next</a>
+        {% endif %}
+    </div>
+</nav>
+{% endif %}
 <script>
 (() => {
   const grid = document.getElementById('market-grid');
@@ -230,8 +246,10 @@
   const listButton = document.getElementById('market-view-list');
   const count = document.getElementById('market-results-count');
   const empty = document.getElementById('market-empty');
+  const serverTotal = Number(grid.dataset.marketTotal || cards.length);
   let currentView = 'grid';
   let isRestoringFilters = false;
+  let filterReloadTimer = null;
 
   function shouldIgnoreCardNavigation(event) {
     return Boolean(event.target.closest('a, button, input, select, textarea'));
@@ -336,9 +354,17 @@
     visible.sort((a, b) => compareCards(a, b, sortSelect.value));
     for (const card of visible) grid.appendChild(card);
 
-    if (count) count.textContent = `${visible.length} of ${cards.length} listings`;
+    if (count) count.textContent = `${visible.length} shown · ${serverTotal} matching`;
     if (empty) empty.classList.toggle('hidden', visible.length !== 0);
     updateMarketUrl();
+  }
+
+  function scheduleServerFilter(delay) {
+    window.clearTimeout(filterReloadTimer);
+    filterReloadTimer = window.setTimeout(() => {
+      updateMarketUrl();
+      window.location.assign(window.location.href);
+    }, delay);
   }
 
   function setMarketView(view) {
@@ -373,8 +399,14 @@
   }
 
   [searchInput, statusSelect, sortSelect, minInput, maxInput, minLengthInput, maxLengthInput, punycodeSelect].forEach((control) => {
-    control.addEventListener('input', applyMarketFilters);
-    control.addEventListener('change', applyMarketFilters);
+    control.addEventListener('input', () => {
+      applyMarketFilters();
+      scheduleServerFilter(400);
+    });
+    control.addEventListener('change', () => {
+      applyMarketFilters();
+      scheduleServerFilter(0);
+    });
   });
 
   resetButton.addEventListener('click', () => {
@@ -387,8 +419,7 @@
     maxLengthInput.value = '';
     punycodeSelect.value = 'all';
     currentView = 'grid';
-    setMarketView(currentView);
-    applyMarketFilters();
+    window.location.assign(window.location.pathname);
   });
 
   gridButton.addEventListener('click', () => setMarketView('grid'));

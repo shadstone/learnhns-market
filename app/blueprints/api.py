@@ -378,8 +378,8 @@ def _pending_listing_payload(pending, refresh=True):
     }
 
 
-def _bob_auction_from_pending(pending):
-    payload = _pending_listing_payload(pending)
+def _bob_auction_from_pending(pending, refresh=False):
+    payload = _pending_listing_payload(pending, refresh=refresh)
     return {
         **payload,
         "bids": [],
@@ -395,6 +395,7 @@ def _listing_is_available(listing):
 
 
 def _active_listings_unique_by_name():
+    """Return the database snapshot used by read-only marketplace routes."""
     listings = (
         Listing.query
         .filter_by(status='active')
@@ -404,8 +405,6 @@ def _active_listings_unique_by_name():
     unique = []
     seen_names = set()
     for listing in listings:
-        if _listing_lock_coin_is_spent(listing):
-            continue
         if listing.is_expired() or listing.name in seen_names:
             continue
         unique.append(listing)
@@ -414,15 +413,12 @@ def _active_listings_unique_by_name():
 
 
 def _active_listing_for_name(name):
-    listing = (
+    return (
         Listing.query
         .filter_by(name=name, status='active')
         .order_by(Listing.created_at.desc())
         .first()
     )
-    if _listing_lock_coin_is_spent(listing):
-        return None
-    return listing
 
 
 def _refreshable_listing_for_name(name):
@@ -514,71 +510,6 @@ def _listing_lock_is_current_owner(listing, transfer_status=None):
         return False
 
     return owner_output_index == lock_output_index
-
-
-def _listing_lock_coin_is_spent(listing):
-    if not listing or listing.status != 'active':
-        return False
-
-    tx_hash, output_index = _listing_coin_ref(listing)
-    if not tx_hash:
-        return False
-
-    transfer_status = _name_transfer_status(listing.name)
-    if _listing_lock_is_current_owner(listing, transfer_status=transfer_status):
-        return False
-    if transfer_status.get('status') in {'transfer-lockup', 'ready-to-finalize'}:
-        verified_sale_tx_hash = _find_verified_listing_sale_tx_hash(listing)
-        if not verified_sale_tx_hash:
-            current_app.logger.info(
-                "Keeping Shakedex listing %s active: transfer state does not spend the listing lock coin.",
-                listing.name,
-            )
-            return False
-
-        listing.status = 'sale-pending'
-        listing.transfer_start_tx_hash = verified_sale_tx_hash
-        db.session.commit()
-        current_app.logger.info(
-            "Marked Shakedex listing %s sale-pending because a buyer transfer spends the listing lock coin.",
-            listing.name,
-        )
-        return True
-
-    _, error = _fetch_hsd_coin(tx_hash, output_index)
-    if not error:
-        return False
-
-    status = error[1]
-    if status != 404:
-        current_app.logger.warning(
-            "Could not verify Shakedex listing coin for %s: %s",
-            listing.name,
-            error[0],
-        )
-        return False
-
-    verified_sale_tx_hash = _find_verified_listing_sale_tx_hash(listing)
-    if verified_sale_tx_hash:
-        listing.status = 'sale-pending'
-        listing.transfer_start_tx_hash = verified_sale_tx_hash
-        db.session.commit()
-        current_app.logger.info(
-            "Marked Shakedex listing %s sale-pending because lock coin %s/%s is spent by verified transfer %s.",
-            listing.name,
-            tx_hash,
-            output_index,
-            verified_sale_tx_hash,
-        )
-        return True
-
-    current_app.logger.info(
-        "Keeping Shakedex listing %s active: lock coin %s/%s is unavailable but no verified buyer transfer was found.",
-        listing.name,
-        tx_hash,
-        output_index,
-    )
-    return False
 
 
 def _tx_spends_listing_coin(tx, listing):
@@ -1709,10 +1640,6 @@ def sales():
         .order_by(Listing.created_at.desc())
         .all()
     )
-    for listing in listings:
-        _resolve_sale_pending_listing(listing)
-        _repair_sold_listing_sale_tx_hash(listing)
-
     return jsonify({
         "total": len(listings),
         "sales": [
@@ -2116,6 +2043,70 @@ def _market_event_payload(event):
     }
 
 
+def _market_index_health(
+    progress,
+    chain_height,
+    *,
+    now=None,
+    stale_seconds=300,
+    max_lag_blocks=6,
+    node_reachable=True,
+):
+    now = now or datetime.utcnow()
+    worker_status = progress.status if progress else 'not-started'
+    updated_at = progress.updated_at if progress else None
+    indexed_height = progress.last_indexed_height if progress else None
+    heartbeat_age_seconds = None
+    if updated_at:
+        heartbeat_age_seconds = max(0, int((now - updated_at).total_seconds()))
+
+    lag_blocks = None
+    if isinstance(chain_height, int) and isinstance(indexed_height, int):
+        lag_blocks = max(chain_height - indexed_height, 0)
+
+    reasons = []
+    if not node_reachable:
+        reasons.append('node-unreachable')
+    if progress is None:
+        reasons.append('not-started')
+    elif worker_status == 'failed':
+        reasons.append('worker-failed')
+    elif worker_status not in {'running', 'watching'}:
+        reasons.append('worker-not-running')
+    if updated_at is None or heartbeat_age_seconds > stale_seconds:
+        reasons.append('stale-heartbeat')
+    if lag_blocks is None:
+        reasons.append('lag-unknown')
+    elif lag_blocks > max_lag_blocks:
+        reasons.append('block-lag')
+
+    healthy = not reasons
+    if healthy:
+        status = 'healthy'
+    elif 'worker-failed' in reasons:
+        status = 'failed'
+    elif 'stale-heartbeat' in reasons:
+        status = 'stale'
+    elif 'block-lag' in reasons:
+        status = 'lagging'
+    else:
+        status = 'unhealthy'
+
+    return {
+        'healthy': healthy,
+        'status': status,
+        'workerStatus': worker_status,
+        'reasons': reasons,
+        'hsdHeight': chain_height,
+        'lastIndexedHeight': indexed_height,
+        'lagBlocks': lag_blocks,
+        'lastHeartbeatAt': updated_at.isoformat() if updated_at else None,
+        'heartbeatAgeSeconds': heartbeat_age_seconds,
+        'staleAfterSeconds': stale_seconds,
+        'maxLagBlocks': max_lag_blocks,
+    }
+
+
 @api_bp.route('/v2/market-index/status', methods=['GET'])
 def market_index_status():
     from app.models import MarketplaceCovenantEvent, MarketplaceIndexerProgress
@@ -2126,16 +2117,26 @@ def market_index_status():
         .order_by(MarketplaceCovenantEvent.block_height.desc())
         .first()
     )
-    return jsonify({
+    chain_payload, chain_status = get_hsd_status_payload()
+    chain_height = chain_payload.get('height') if chain_status == 200 else None
+    health = _market_index_health(
+        progress,
+        chain_height,
+        stale_seconds=current_app.config.get('MARKET_INDEXER_STALE_SECONDS', 300),
+        max_lag_blocks=current_app.config.get('MARKET_INDEXER_MAX_LAG_BLOCKS', 6),
+        node_reachable=chain_status == 200 and chain_payload.get('reachable', False),
+    )
+    payload = {
         "network": "main",
-        "status": progress.status if progress else "not-started",
-        "lastIndexedHeight": progress.last_indexed_height if progress else None,
+        **health,
         "targetHeight": progress.target_height if progress else None,
         "eventsIndexed": progress.events_indexed if progress else 0,
         "lastError": progress.last_error if progress else None,
         "updatedAt": progress.updated_at.isoformat() if progress and progress.updated_at else None,
         "latestEvent": _market_event_payload(latest_event) if latest_event else None,
-    })
+        "nodeError": chain_payload.get('error') if chain_status != 200 else None,
+    }
+    return jsonify(payload), 200 if health['healthy'] else 503
 
 
 @api_bp.route('/v2/market-index/refresh', methods=['POST'])
