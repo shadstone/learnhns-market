@@ -114,7 +114,7 @@ A cached browse result must never be treated as sufficient authorization to perf
 
 ### Goal 1 — Restore and observe the indexer
 
-Status: In progress — crash diagnosed and code fix implemented locally
+Status: In progress — production restored and caught up; 24-hour observation window active
 
 - Confirm the Railway marketplace-indexer service exists and is running.
 - Determine why it stopped updating after 2026-07-14.
@@ -131,7 +131,7 @@ Done when:
 
 ### Goal 2 — Make browse routes database-only
 
-Status: Implemented locally; production activation remains blocked by indexer catch-up
+Status: Completed in production on 2026-07-25
 
 - Split database selection from live chain reconciliation.
 - Remove per-listing HSD calls from `/`, `/pending`, `/stats`, and read-only listing feeds.
@@ -149,7 +149,7 @@ Done when:
 
 ### Goal 3 — Add safe response caching
 
-Status: Implemented locally; production verification pending
+Status: Completed in production on 2026-07-25
 
 - Define separate behavior for anonymous and authenticated responses.
 - Add a short cache policy for anonymous marketplace browse responses.
@@ -166,7 +166,7 @@ Done when:
 
 ### Goal 4 — Reduce initial render cost
 
-Status: Implemented locally; production verification pending
+Status: Completed in production on 2026-07-25
 
 - Paginate or progressively load listings instead of rendering all listings into the first HTML response.
 - Preserve search, price, length, status, watcher, and punycode filters using server-side query parameters or a paginated API.
@@ -184,7 +184,7 @@ Done when:
 
 ### Goal 5 — Verify scale, cost, and correctness
 
-Status: Blocked by Goals 1–4
+Status: In progress — production load test passed; observation window and cost review remain
 
 - Record p50, p95, and p99 TTFB for the primary routes.
 - Load-test concurrent anonymous browsing without performing marketplace actions.
@@ -231,6 +231,79 @@ This remediation is complete when:
 - Buying, listing, cancellation, sale, and finalization actions still perform live HSD verification.
 - Before/after performance and infrastructure-cost measurements are recorded in this document.
 
+## Production verification
+
+Post-deployment measurements from Bangkok on 2026-07-25:
+
+| Check | Before | After |
+| --- | ---: | ---: |
+| Homepage TTFB, individual requests | 6.8–8.0 seconds | 0.40–0.58 seconds |
+| Homepage HTML | 530,230 bytes | 105,253 bytes |
+| Listings rendered initially | About 290 | 48 |
+| Marketplace index lag | 1,447 blocks | 0 blocks |
+| Indexer health endpoint | HTTP 200 but misleading `watching` | HTTP 200 with `healthy: true`, zero lag, and fresh heartbeat |
+
+Production load test:
+
+- Requests: 100
+- Concurrency: 10
+- Failures: 0
+- Wall time: 4.984 seconds
+- TTFB p50: 329 ms
+- TTFB p95: 647 ms
+- TTFB p99: 876 ms
+- Maximum TTFB: 903 ms
+- Total response time p95: 878 ms
+- Total response time p99: 1,128 ms
+
+Additional live checks:
+
+- `/pending`: 0.50-second TTFB
+- `/stats`: 0.46-second TTFB
+- `/sold`: 0.71-second TTFB
+- Anonymous browse responses: `public, max-age=15, s-maxage=30, stale-while-revalidate=60`
+- Requests carrying an account cookie: `private, no-store`
+- Versioned static assets: `public, max-age=31536000, immutable`
+- Tailwind is served as a compiled 26,600-byte stylesheet.
+- Pagination, full-dataset search, status filtering, and price sorting returned HTTP 200 in production.
+
+## Monitoring and recovery
+
+Public health check:
+
+```text
+https://market.learnhns.com/api/v2/market-index/status
+```
+
+Healthy criteria:
+
+- HTTP status is 200.
+- `healthy` is `true`.
+- `lagBlocks` is at most 6.
+- `heartbeatAgeSeconds` is at most 300.
+- `lastError` is empty.
+
+Unhealthy responses use HTTP 503 and include machine-readable reasons such as `stale-heartbeat`, `block-lag`, `worker-failed`, or `node-unreachable`.
+
+Railway services:
+
+- Web: `learnhns-market`
+- Indexer: `learnhns-marketplace-indexer`
+- Node: `learnhns-hsd`
+
+Recovery sequence:
+
+1. Inspect the public health payload and record HSD height, indexed height, lag, heartbeat age, and error.
+2. Inspect the Railway indexer deployment status and recent logs.
+3. Confirm HSD is reachable and fully synced.
+4. Restart or redeploy the indexer only after identifying whether the failure is application, database, or HSD related.
+5. Confirm the stored index height advances without gaps.
+6. Wait for lag to return to the configured threshold.
+7. Confirm the health endpoint returns HTTP 200 and remains fresh.
+8. Do not reintroduce request-time reconciliation as a recovery shortcut.
+
+A Codex heartbeat named `LearnHNS market 24h health watch` checks health and homepage performance hourly for 24 runs. It reports failures to this task.
+
 ## Change log
 
 | Date | Change | Result |
@@ -240,3 +313,5 @@ This remediation is complete when:
 | 2026-07-25 | Implemented indexer input validation, resilient polling, heartbeat updates, truthful health reporting, and hourly historical-hash reconciliation | Ten container tests passing |
 | 2026-07-25 | Implemented database-only browse snapshots, short anonymous caching, 48-row pagination, server-side filtering, versioned assets, and precompiled Tailwind CSS | Local container verification passing; production deployment pending |
 | 2026-07-25 | Deployed the repaired indexer and optimized web application to Railway | Homepage TTFB reduced to 0.40–0.58 seconds; indexer catch-up in progress |
+| 2026-07-25 | Completed indexer catch-up and production load test | Zero block lag; 100 requests at concurrency 10 with zero failures and 647 ms p95 TTFB |
+| 2026-07-25 | Started hourly 24-run health observation | Automation `learnhns-market-24h-health-watch` active |
