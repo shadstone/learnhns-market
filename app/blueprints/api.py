@@ -1042,6 +1042,36 @@ def _fetch_hsd_name_info(name):
     return info, error
 
 
+def _verify_listing_proof_on_chain(proof_data):
+    tx_hash = proof_data['lockingTxHash'].lower()
+    output_index = proof_data['lockingOutputIdx']
+    coin, coin_error = _fetch_hsd_coin(tx_hash, output_index)
+    if coin_error:
+        message, status = coin_error[:2]
+        return False, message, status
+
+    name = proof_data['name'].lower().rstrip('/')
+    name_info, name_error = _fetch_hsd_name_info(name)
+    if name_error:
+        message, status = name_error[:2]
+        return False, message, status
+
+    info = name_info.get('info') if isinstance(name_info, dict) else None
+    owner = info.get('owner') if isinstance(info, dict) else None
+    if not isinstance(owner, dict):
+        return False, "HSD did not return a current owner for this name", 409
+
+    owner_hash = str(owner.get('hash') or '').lower()
+    try:
+        owner_index = int(owner.get('index'))
+    except (TypeError, ValueError):
+        owner_index = None
+    if owner_hash != tx_hash or owner_index != output_index:
+        return False, "The proof locking output is not the name's current on-chain owner coin", 409
+
+    return True, coin, 200
+
+
 def _observed_market_names(limit):
     names = []
     seen = set()
@@ -2646,6 +2676,11 @@ def upload_proof():
     if listing_fields['expires_at'] and listing_fields['expires_at'] < datetime.utcnow():
         os.remove(temp_path)
         return jsonify({"error": "This proof has already expired. Please create a fresh proof and upload it again."}), 400
+
+    chain_valid, chain_result, chain_status = _verify_listing_proof_on_chain(proof_data)
+    if not chain_valid:
+        os.remove(temp_path)
+        return jsonify({"error": chain_result}), chain_status
 
     existing_active = (
         Listing.query

@@ -1,3 +1,5 @@
+from io import BytesIO
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -132,6 +134,7 @@ class BrowseSnapshotTests(unittest.TestCase):
             'TESTING': True,
             'SQLALCHEMY_DATABASE_URI': f"sqlite:///{database_path}",
             'HSD_HTTP_URL': None,
+            'UPLOAD_FOLDER': self.tempdir.name,
             'WTF_CSRF_ENABLED': False,
         })
         with self.app.app_context():
@@ -260,6 +263,133 @@ class BrowseSnapshotTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         fetch_coin.assert_called_once_with('a' * 64, 0)
+
+    def test_listing_upload_verifies_live_owner_coin(self):
+        lock_hash = '8' * 64
+        proof = {
+            'version': 2,
+            'name': 'verifiedlisting',
+            'lockingTxHash': lock_hash,
+            'lockingOutputIdx': 0,
+            'publicKey': '02' + ('9' * 64),
+            'paymentAddr': 'hs1q' + ('a' * 35),
+            'data': [{
+                'price': 1_000_000,
+                'lockTime': int(datetime.utcnow().timestamp()),
+                'signature': 'a' * 130,
+            }],
+            'expiresAt': int((datetime.utcnow() + timedelta(days=1)).timestamp()),
+        }
+        coin = {'hash': lock_hash, 'index': 0, 'value': 1}
+        name_info = {
+            'info': {
+                'owner': {
+                    'hash': lock_hash,
+                    'index': 0,
+                },
+            },
+        }
+
+        with (
+            patch('app.blueprints.api._fetch_hsd_coin', return_value=(coin, None)) as fetch_coin,
+            patch('app.blueprints.api._fetch_hsd_name_info', return_value=(name_info, None)) as fetch_name,
+            patch('app.blueprints.api.pin_to_ipfs', return_value='verified-cid'),
+            patch('app.blueprints.api.send_gfavip_webhook'),
+        ):
+            response = self.client.post(
+                '/api/upload-proof',
+                data={
+                    'proof': (
+                        BytesIO(json.dumps(proof).encode()),
+                        'verified-proof.json',
+                    ),
+                },
+                content_type='multipart/form-data',
+            )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        fetch_coin.assert_called_once_with(lock_hash, 0)
+        fetch_name.assert_called_once_with('verifiedlisting')
+
+    def test_sale_recording_verifies_spending_transaction(self):
+        sale_tx_hash = '9' * 64
+        tx = {
+            'hash': sale_tx_hash,
+            'inputs': [{
+                'prevout': {
+                    'hash': 'a' * 64,
+                    'index': 0,
+                },
+            }],
+        }
+        with (
+            patch('app.blueprints.api._fetch_hsd_tx', return_value=(tx, None)) as fetch_tx,
+            patch('app.blueprints.api._index_marketplace_sale_txs'),
+        ):
+            response = self.client.post(
+                '/api/v2/listings/fastmarket/refresh-status',
+                json={'saleTxHash': sale_tx_hash, 'outcome': 'sold'},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()['sold'])
+        self.assertGreaterEqual(fetch_tx.call_count, 1)
+        with self.app.app_context():
+            self.assertEqual(
+                Listing.query.filter_by(name='fastmarket').one().status,
+                'sold',
+            )
+
+    def test_cancellation_recording_verifies_spending_transaction(self):
+        cancel_tx_hash = 'b' * 64
+        tx = {
+            'hash': cancel_tx_hash,
+            'inputs': [{
+                'prevout': {
+                    'hash': 'a' * 64,
+                    'index': 0,
+                },
+            }],
+        }
+        with patch('app.blueprints.api._fetch_hsd_tx', return_value=(tx, None)) as fetch_tx:
+            response = self.client.post(
+                '/api/v2/listings/fastmarket/refresh-status',
+                json={'cancelTxHash': cancel_tx_hash, 'outcome': 'cancelled'},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()['cancelled'])
+        self.assertGreaterEqual(fetch_tx.call_count, 1)
+        with self.app.app_context():
+            self.assertEqual(
+                Listing.query.filter_by(name='fastmarket').one().status,
+                'cancelled',
+            )
+
+    def test_transfer_status_verifies_live_chain_and_name_state(self):
+        with (
+            patch(
+                'app.blueprints.api.get_hsd_status_payload',
+                return_value=({'height': 200, 'reachable': True}, 200),
+            ) as fetch_chain,
+            patch(
+                'app.blueprints.api._fetch_hsd_name_info',
+                return_value=({
+                    'info': {
+                        'owner': {'hash': 'c' * 64, 'index': 0},
+                        'transfer': 0,
+                        'stats': {},
+                        'state': 'CLOSED',
+                    },
+                }, None),
+            ) as fetch_name,
+        ):
+            response = self.client.get('/api/v2/names/fastmarket/transfer-status')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['status'], 'finalized')
+        fetch_chain.assert_called_once_with()
+        fetch_name.assert_called_once_with('fastmarket')
 
     def test_indexer_restart_resumes_after_stored_checkpoint(self):
         checkpoint_hash = '1' * 64
