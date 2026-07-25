@@ -2,8 +2,9 @@
 
 Status: In progress
 Created: 2026-07-25
-Repository: `shadstoneofficial/learnhns-market`
+Repository: `shadstone/learnhns-market`
 Production site: `https://market.learnhns.com`
+Draft pull request: `https://github.com/shadstone/learnhns-market/pull/1`
 
 ## Problem statement
 
@@ -341,3 +342,4 @@ The worker keeps 2,016 recent block checkpoints and searches up to 720 blocks fo
 | 2026-07-25 | Audited all read-only listing feeds and removed the remaining live refresh from `/api/v2/pending-listings` | Container tests now assert that browse feeds make no transaction, name, or chain calls; production feed TTFB is 0.53 seconds |
 | 2026-07-25 | Added durable block checkpoints, reorganization rollback/replay, restart-resumption coverage, and node-unavailable coverage | 13 container tests and a clean Alembic migration pass; production worker initialized its checkpoint at height 339,667 with zero lag |
 | 2026-07-25 | Added live owner-coin validation to listing proof uploads and audited all transaction-sensitive paths | 19 container tests cover listing, buying, sale, cancellation, transfer-finalization, bounded browse queries, and indexer-driven listing removal; final web deployment healthy at zero index lag |
+| 2026-07-25 | Opened draft pull request 1 against `main` | Deployed changes are reviewable; PR remains draft until the observation and final cost gates complete |
