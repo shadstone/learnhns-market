@@ -1,0 +1,31 @@
+name: Market performance regression
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  container-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build production container
+        run: docker build -t learnhns-market-ci .
+
+      - name: Run regression suite
+        run: docker run --rm learnhns-market-ci python -m unittest discover -s tests -v
+
+      - name: Verify clean database migration
+        run: >-
+          docker run --rm
+          -e DATABASE_URL=sqlite:////tmp/learnhns-migration-test.db
+          learnhns-market-ci
+          sh -lc 'flask db upgrade && test "$(flask db current | tail -1)" = "4d7e9a1b2c3f (head)"'
