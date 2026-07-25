@@ -284,10 +284,12 @@ Railway service metrics provide the infrastructure baseline. The before window i
 | Web memory average | 186.5 MB | 174.9 MB | -6.2% |
 | HSD CPU average | 0.0248 vCPU | 0.00057 vCPU | -97.7% |
 | HSD memory average | 2,898.7 MB | 3,157.8 MB | +8.9% |
+| PostgreSQL CPU average | 0.00062 vCPU | 0.00042 vCPU | -32.4% |
+| PostgreSQL memory average | 252.0 MB | 287.3 MB | +14.0% |
 | Indexer CPU average | 0 vCPU because the worker was stopped | 0.00009 vCPU | Worker restored at negligible steady CPU |
 | Indexer memory average | 0 MB because the worker was stopped | 89.6 MB | Cost of restored continuous indexing |
 
-The early sample supports the expected CPU reduction from removing hundreds of request-time HSD calls. It is not yet a final monthly-cost estimate: the post-deployment interval is short, contains the production load test, and HSD memory varies independently of web request handling. The final comparison will use the complete observation window and Railway's current per-minute CPU and memory pricing.
+The early sample supports the expected CPU reduction from removing hundreds of request-time HSD calls. PostgreSQL public ingress and egress remained zero, and the first final-build HTTP window contained 14 requests with no 5xx responses. This is not yet a final monthly-cost estimate: the post-deployment interval is short, contains the production load test, and service memory varies independently of web request handling. The final comparison will use the complete observation window and Railway's current per-minute CPU and memory pricing.
 
 ## Monitoring and recovery
 
