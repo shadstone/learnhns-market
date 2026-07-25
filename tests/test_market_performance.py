@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import create_app
-from app.models import Listing, db
+from app.models import Listing, PendingListing, db
 from app.blueprints.api import _market_index_health
 from app import marketplace_indexer
 
@@ -122,6 +122,13 @@ class BrowseSnapshotTests(unittest.TestCase):
                 },
                 status='active',
             ))
+            db.session.add(PendingListing(
+                name='pendingmarket',
+                network='main',
+                transfer_tx_hash='b' * 64,
+                transfer_output_idx=0,
+                status='pending-submitted',
+            ))
             db.session.commit()
         self.client = self.app.test_client()
 
@@ -139,9 +146,18 @@ class BrowseSnapshotTests(unittest.TestCase):
         }, 200)
         with (
             patch('app.blueprints.api._name_transfer_status', side_effect=AssertionError('unexpected live listing check')),
+            patch('app.blueprints.api._fetch_hsd_tx', side_effect=AssertionError('unexpected live transaction check')),
+            patch('app.blueprints.api._fetch_hsd_name_info', side_effect=AssertionError('unexpected live name check')),
+            patch('app.blueprints.api.get_hsd_status_payload', side_effect=AssertionError('unexpected live chain check')),
             patch('app.blueprints.main.get_hsd_status_payload', return_value=ready),
         ):
-            for path in ('/', '/pending', '/stats', '/api/v2/auctions'):
+            for path in (
+                '/',
+                '/pending',
+                '/stats',
+                '/api/v2/auctions',
+                '/api/v2/pending-listings',
+            ):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200, path)
                 self.assertIn('public', response.headers['Cache-Control'], path)

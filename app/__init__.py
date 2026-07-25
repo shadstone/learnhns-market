@@ -69,6 +69,7 @@ def create_app(config_overrides=None):
             'main.sold',
             'main.stats',
             'api.auctions',
+            'api.pending_listings',
             'api.sales',
         }
         if request.endpoint in public_routes and not request.cookies.get(SESSION_COOKIE):

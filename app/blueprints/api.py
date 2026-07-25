@@ -1901,7 +1901,7 @@ def pending_listings():
     ]
     return jsonify({
         "total": len(pending),
-        "pending": [_pending_listing_payload(row) for row in pending],
+        "pending": [_pending_listing_payload(row, refresh=False) for row in pending],
     })
 
 
