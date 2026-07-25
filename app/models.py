@@ -176,6 +176,25 @@ class MarketplaceIndexerProgress(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class MarketplaceBlockCheckpoint(db.Model):
+    __tablename__ = 'marketplace_block_checkpoints'
+
+    id = db.Column(db.Integer, primary_key=True)
+    network = db.Column(db.String(20), default='main', nullable=False, index=True)
+    block_height = db.Column(db.Integer, nullable=False, index=True)
+    block_hash = db.Column(db.String(64), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'network',
+            'block_height',
+            name='uq_market_block_checkpoint_network_height',
+        ),
+    )
+
+
 class Account(db.Model):
     __tablename__ = 'accounts'
 

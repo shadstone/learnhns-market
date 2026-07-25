@@ -6,7 +6,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import create_app
-from app.models import Listing, PendingListing, db
+from app.models import (
+    Listing,
+    MarketplaceBlockCheckpoint,
+    MarketplaceCovenantEvent,
+    MarketplaceIndexerProgress,
+    PendingListing,
+    db,
+)
 from app.blueprints.api import _market_index_health
 from app import marketplace_indexer
 
@@ -56,6 +63,25 @@ class MarketIndexHealthTests(unittest.TestCase):
         self.assertIn('worker-not-running', health['reasons'])
         self.assertIn('lag-unknown', health['reasons'])
 
+    def test_unreachable_node_is_unhealthy(self):
+        now = datetime(2026, 7, 25, 12, 0, 0)
+        progress = SimpleNamespace(
+            status='watching',
+            last_indexed_height=100,
+            updated_at=now,
+        )
+
+        health = _market_index_health(
+            progress,
+            None,
+            now=now,
+            node_reachable=False,
+        )
+
+        self.assertFalse(health['healthy'])
+        self.assertIn('node-unreachable', health['reasons'])
+        self.assertIn('lag-unknown', health['reasons'])
+
 
 class MarketplaceIndexerTests(unittest.TestCase):
     def test_normalize_name_rejects_control_characters(self):
@@ -78,6 +104,11 @@ class MarketplaceIndexerTests(unittest.TestCase):
         with (
             patch.object(marketplace_indexer, 'get_chain_height', return_value=100),
             patch.object(marketplace_indexer, 'progress_for', return_value=progress),
+            patch.object(
+                marketplace_indexer,
+                'reconcile_chain_reorganization',
+                return_value={'detected': False, 'checkpointInitialized': False},
+            ),
             patch.object(marketplace_indexer, 'db', fake_db),
             patch.object(marketplace_indexer, 'get_block_hash') as get_block_hash,
         ):
@@ -229,6 +260,129 @@ class BrowseSnapshotTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         fetch_coin.assert_called_once_with('a' * 64, 0)
+
+    def test_indexer_restart_resumes_after_stored_checkpoint(self):
+        checkpoint_hash = '1' * 64
+        next_hash = '2' * 64
+        with self.app.app_context():
+            db.session.add(MarketplaceIndexerProgress(
+                network='main',
+                status='watching',
+                last_indexed_height=100,
+                target_height=100,
+                events_indexed=0,
+            ))
+            db.session.add(MarketplaceBlockCheckpoint(
+                network='main',
+                block_height=100,
+                block_hash=checkpoint_hash,
+            ))
+            db.session.commit()
+
+            with (
+                patch.object(marketplace_indexer, 'get_chain_height', return_value=101),
+                patch.object(
+                    marketplace_indexer,
+                    'get_block_hash',
+                    side_effect=lambda height: {
+                        100: checkpoint_hash,
+                        101: next_hash,
+                    }[height],
+                ),
+                patch.object(marketplace_indexer, 'get_block', return_value={'tx': []}),
+            ):
+                result = marketplace_indexer.scan_market_blocks()
+
+            progress = MarketplaceIndexerProgress.query.filter_by(network='main').one()
+            checkpoint = MarketplaceBlockCheckpoint.query.filter_by(
+                network='main',
+                block_height=101,
+            ).one()
+            self.assertEqual(result['startHeight'], 101)
+            self.assertEqual(result['blocksProcessed'], 1)
+            self.assertEqual(progress.last_indexed_height, 101)
+            self.assertEqual(checkpoint.block_hash, next_hash)
+
+    def test_indexer_rewinds_and_replays_a_chain_reorganization(self):
+        ancestor_hash = '3' * 64
+        orphan_hash = '4' * 64
+        replacement_hash = '5' * 64
+        next_hash = '6' * 64
+        orphan_tx_hash = '7' * 64
+        with self.app.app_context():
+            listing = Listing.query.filter_by(name='fastmarket').one()
+            listing.status = 'sold'
+            listing.sold_at = datetime.utcnow()
+            listing.sale_tx_hash = orphan_tx_hash
+            listing.transfer_start_tx_hash = orphan_tx_hash
+            db.session.add(MarketplaceIndexerProgress(
+                network='main',
+                status='watching',
+                last_indexed_height=100,
+                target_height=100,
+                events_indexed=1,
+            ))
+            db.session.add_all([
+                MarketplaceBlockCheckpoint(
+                    network='main',
+                    block_height=99,
+                    block_hash=ancestor_hash,
+                ),
+                MarketplaceBlockCheckpoint(
+                    network='main',
+                    block_height=100,
+                    block_hash=orphan_hash,
+                ),
+                MarketplaceCovenantEvent(
+                    network='main',
+                    name='fastmarket',
+                    covenant_action='TRANSFER',
+                    tx_hash=orphan_tx_hash,
+                    output_index=0,
+                    block_height=100,
+                    block_hash=orphan_hash,
+                    source='hsd-block',
+                ),
+            ])
+            db.session.commit()
+
+            with (
+                patch.object(marketplace_indexer, 'get_chain_height', return_value=101),
+                patch.object(
+                    marketplace_indexer,
+                    'get_block_hash',
+                    side_effect=lambda height: {
+                        99: ancestor_hash,
+                        100: replacement_hash,
+                        101: next_hash,
+                    }[height],
+                ),
+                patch.object(marketplace_indexer, 'get_block', return_value={'tx': []}),
+            ):
+                result = marketplace_indexer.scan_market_blocks()
+
+            db.session.refresh(listing)
+            progress = MarketplaceIndexerProgress.query.filter_by(network='main').one()
+            self.assertTrue(result['reorg']['detected'])
+            self.assertEqual(result['reorg']['ancestorHeight'], 99)
+            self.assertEqual(result['reorg']['depth'], 1)
+            self.assertEqual(result['reorg']['eventsRemoved'], 1)
+            self.assertEqual(result['reorg']['listingsReverted'], 1)
+            self.assertEqual(result['blocksProcessed'], 2)
+            self.assertEqual(progress.last_indexed_height, 101)
+            self.assertEqual(listing.status, 'active')
+            self.assertIsNone(listing.sale_tx_hash)
+            self.assertEqual(
+                MarketplaceCovenantEvent.query.filter_by(tx_hash=orphan_tx_hash).count(),
+                0,
+            )
+            self.assertEqual(
+                MarketplaceBlockCheckpoint.query.filter_by(
+                    network='main',
+                    block_height=100,
+                ).one().block_hash,
+                replacement_hash,
+            )
 
 
 if __name__ == '__main__':
