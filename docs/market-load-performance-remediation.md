@@ -90,9 +90,11 @@ Homepage, pending, stats, search, and listing feeds read marketplace state from 
 A continuously running marketplace indexer:
 
 - Tracks HSD height and its own indexed height.
+- Stores recent block-height/hash checkpoints and verifies the indexed tip each cycle.
 - Scans new blocks.
 - Detects spends of listing lock coins.
 - Records TRANSFER and FINALIZE events.
+- Rewinds orphaned events and listing state to the last common checkpoint before replaying a chain reorganization.
 - Updates listing status transactionally.
 - Exposes honest health and lag metrics.
 - Alerts when stopped, stale, or behind.
@@ -189,7 +191,7 @@ Status: In progress — production load test passed; observation window and cost
 - Record p50, p95, and p99 TTFB for the primary routes.
 - Load-test concurrent anonymous browsing without performing marketplace actions.
 - Track application CPU, HSD CPU, database load, request volume, and error rate.
-- Test indexer restart, HSD unavailability, stale data, and reorganization handling.
+- Test indexer restart, HSD unavailability, stale data, and reorganization handling. Completed in the 13-test container suite.
 - Document operational recovery steps.
 
 Done when:
@@ -320,6 +322,8 @@ Recovery sequence:
 
 A Codex heartbeat named `LearnHNS market 24h health watch` checks health and homepage performance hourly for 24 runs. It reports failures to this task.
 
+The worker keeps 2,016 recent block checkpoints and searches up to 720 blocks for a common ancestor if the stored tip hash no longer matches HSD. A supported reorganization removes orphaned `hsd-block` events, reverts listings whose recorded sale transaction was orphaned, and deterministically replays from the common ancestor. A deeper reorganization fails visibly rather than silently trusting potentially invalid marketplace state.
+
 ## Change log
 
 | Date | Change | Result |
@@ -333,3 +337,4 @@ A Codex heartbeat named `LearnHNS market 24h health watch` checks health and hom
 | 2026-07-25 | Started hourly 24-run health observation | Automation `learnhns-market-24h-health-watch` active |
 | 2026-07-25 | Captured Railway complaint-window and early post-deployment resource metrics | Web CPU down 71.7% and HSD CPU down 97.7%; final cost conclusion deferred until the observation window completes |
 | 2026-07-25 | Audited all read-only listing feeds and removed the remaining live refresh from `/api/v2/pending-listings` | Container tests now assert that browse feeds make no transaction, name, or chain calls; production feed TTFB is 0.53 seconds |
+| 2026-07-25 | Added durable block checkpoints, reorganization rollback/replay, restart-resumption coverage, and node-unavailable coverage | 13 container tests and a clean Alembic migration pass; production worker initialized its checkpoint at height 339,667 with zero lag |
