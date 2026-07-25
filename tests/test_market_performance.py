@@ -7,6 +7,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from sqlalchemy import event
+
 from app import create_app
 from app.models import (
     Listing,
@@ -245,6 +247,52 @@ class BrowseSnapshotTests(unittest.TestCase):
         self.assertIn(b'Page 1 of 2', first_page.data)
         self.assertIn(b'market-58', filtered.data)
         self.assertEqual(filtered.data.count(b'\n         data-market-card'), 1)
+
+    def test_homepage_database_query_count_is_bounded(self):
+        with self.app.app_context():
+            for index in range(60):
+                name = f"query-market-{index:02d}"
+                db.session.add(Listing(
+                    name=name,
+                    price_hns=Decimal(index + 1),
+                    seller_hns_address='hs1qtest',
+                    ipfs_cid=f"query-cid-{index}",
+                    proof_json={
+                        'name': name,
+                        'lockingTxHash': f"{index + 100:064x}",
+                        'lockingOutputIdx': 0,
+                        'publicKey': 'test-key',
+                        'paymentAddr': 'hs1qtest',
+                        'data': [],
+                        'version': 2,
+                    },
+                    status='active',
+                ))
+            db.session.commit()
+            engine = db.engine
+
+        statements = []
+
+        def record_statement(*args):
+            statements.append(args[2])
+
+        event.listen(engine, 'before_cursor_execute', record_statement)
+        try:
+            with patch('app.blueprints.main.get_hsd_status_payload', return_value=({
+                'reachable': True,
+                'progress': 1,
+                'height': 100,
+            }, 200)):
+                response = self.client.get('/')
+        finally:
+            event.remove(engine, 'before_cursor_execute', record_statement)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(
+            len(statements),
+            10,
+            f"Homepage issued {len(statements)} SQL statements",
+        )
 
     def test_precompiled_assets_are_versioned_and_cacheable(self):
         response = self.client.get('/')
@@ -513,6 +561,39 @@ class BrowseSnapshotTests(unittest.TestCase):
                 ).one().block_hash,
                 replacement_hash,
             )
+
+    def test_indexed_listing_spend_removes_listing_from_active_snapshot(self):
+        spend_hash = 'd' * 64
+        with self.app.app_context():
+            listing = Listing.query.filter_by(name='fastmarket').one()
+            indexed = marketplace_indexer.index_tx(
+                {
+                    'hash': spend_hash,
+                    'inputs': [{
+                        'prevout': {
+                            'hash': 'a' * 64,
+                            'index': 0,
+                        },
+                    }],
+                    'outputs': [],
+                },
+                block={
+                    'height': 101,
+                    'hash': 'e' * 64,
+                    'time': int(datetime.utcnow().timestamp()),
+                },
+                observed_names={'fastmarket'},
+                listing_refs={
+                    ('a' * 64, 0): [listing],
+                },
+            )
+            db.session.commit()
+
+            db.session.refresh(listing)
+            self.assertEqual(indexed, 1)
+            self.assertEqual(listing.status, 'sold')
+            self.assertEqual(listing.sale_tx_hash, spend_hash)
+            self.assertEqual(listing.transfer_start_tx_hash, spend_hash)
 
 
 if __name__ == '__main__':

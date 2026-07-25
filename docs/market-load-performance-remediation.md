@@ -269,7 +269,8 @@ Additional live checks:
 - Versioned static assets: `public, max-age=31536000, immutable`
 - Tailwind is served as a compiled 26,600-byte stylesheet.
 - Pagination, full-dataset search, status filtering, and price sorting returned HTTP 200 in production.
-- The 17-test container suite proves that listing uploads validate the live owner coin, buying re-fetches the listing coin, sale and cancellation records validate the spending transaction, and transfer-finalization status reads live chain and name state.
+- The 19-test container suite proves that listing uploads validate the live owner coin, buying re-fetches the listing coin, sale and cancellation records validate the spending transaction, and transfer-finalization status reads live chain and name state.
+- Regression coverage also bounds homepage SQL statements independently of listing count and proves that an indexed lock-coin spend removes the listing from the active snapshot.
 
 ### Railway resource and cost evidence
 
@@ -339,4 +340,4 @@ The worker keeps 2,016 recent block checkpoints and searches up to 720 blocks fo
 | 2026-07-25 | Captured Railway complaint-window and early post-deployment resource metrics | Web CPU down 71.7% and HSD CPU down 97.7%; final cost conclusion deferred until the observation window completes |
 | 2026-07-25 | Audited all read-only listing feeds and removed the remaining live refresh from `/api/v2/pending-listings` | Container tests now assert that browse feeds make no transaction, name, or chain calls; production feed TTFB is 0.53 seconds |
 | 2026-07-25 | Added durable block checkpoints, reorganization rollback/replay, restart-resumption coverage, and node-unavailable coverage | 13 container tests and a clean Alembic migration pass; production worker initialized its checkpoint at height 339,667 with zero lag |
-| 2026-07-25 | Added live owner-coin validation to listing proof uploads and audited all transaction-sensitive paths | 17 container tests cover listing, buying, sale, cancellation, and transfer-finalization verification; final web deployment healthy at zero index lag |
+| 2026-07-25 | Added live owner-coin validation to listing proof uploads and audited all transaction-sensitive paths | 19 container tests cover listing, buying, sale, cancellation, transfer-finalization, bounded browse queries, and indexer-driven listing removal; final web deployment healthy at zero index lag |
