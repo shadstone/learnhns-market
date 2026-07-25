@@ -274,6 +274,13 @@ Additional live checks:
 - Regression coverage also bounds homepage SQL statements independently of listing count and proves that an indexed lock-coin spend removes the listing from the active snapshot.
 - Draft PR CI rebuilds the production image, runs all 19 tests, and migrates an empty database to the current Alembic head. Run `30142314984` passed without warnings.
 
+Real-browser verification:
+
+- The production homepage rendered 48 of 290 matching listings and exposed page 2 of 7.
+- A cached repeat homepage load completed in 456 ms; a filtered repeat load completed in 480 ms.
+- Searching for `folkman`, selected from page 2, reloaded the server-backed query and returned exactly one matching card.
+- The browser console reported no warnings or errors during navigation, filtering, pagination inspection, or repeat loads.
+
 ### Railway resource and cost evidence
 
 Railway service metrics provide the infrastructure baseline. The before window is the 2026-07-24 complaint period from 09:00:00–11:46:40 UTC. The first post-deployment sample is from 2026-07-25 after 03:08 UTC.
@@ -347,3 +354,4 @@ The worker keeps 2,016 recent block checkpoints and searches up to 720 blocks fo
 | 2026-07-25 | Added live owner-coin validation to listing proof uploads and audited all transaction-sensitive paths | 19 container tests cover listing, buying, sale, cancellation, transfer-finalization, bounded browse queries, and indexer-driven listing removal; final web deployment healthy at zero index lag |
 | 2026-07-25 | Opened draft pull request 1 against `main` | Deployed changes are reviewable; PR remains draft until the observation and final cost gates complete |
 | 2026-07-25 | Added GitHub Actions regression and migration verification | PR run `30142314984` passed the container build, 19 tests, and clean database migration |
+| 2026-07-25 | Completed real-browser navigation, pagination, cross-page search, repeat-load, and console verification | 456 ms repeat homepage load; page-2 name search returned one result; no browser warnings or errors |
