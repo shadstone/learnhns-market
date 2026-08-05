@@ -21,10 +21,13 @@ from datetime import datetime, timedelta
 from urllib.parse import urljoin
 
 api_bp = Blueprint('api', __name__)
-limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day"])
+# Only explicitly decorated write/admin routes are limited. Public market reads
+# must remain available without a blanket per-IP cap.
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 SHAKEDEX_TRANSFER_LOCKUP = 288
 PENDING_TERMINAL_STATUSES = {'active', 'cancelled', 'expired', 'failed'}
+PROOF_UPLOAD_RATE_LIMIT = "100 per hour"
 
 
 @api_bp.route('/v2/watchers/counts', methods=['GET'])
@@ -2647,7 +2650,7 @@ def refresh_expiring_names():
 
 
 @api_bp.route('/upload-proof', methods=['POST'])
-@limiter.limit("10 per hour")  # per IP
+@limiter.limit(PROOF_UPLOAD_RATE_LIMIT)  # per IP; supports Bob's bulk-submit workflow.
 def upload_proof():
     if 'proof' not in request.files:
         return jsonify({"error": "No proof file"}), 400

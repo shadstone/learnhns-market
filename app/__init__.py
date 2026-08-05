@@ -4,7 +4,7 @@ from flask_cors import CORS
 from app.config import Config
 from app.models import db
 from app.blueprints.main import main_bp
-from app.blueprints.api import api_bp
+from app.blueprints.api import api_bp, limiter
 from app.blueprints.account import account_bp
 from app.blueprints.support_wall import support_wall_bp
 from app.auth import SESSION_COOKIE, current_account
@@ -35,6 +35,7 @@ def create_app(config_overrides=None):
     db.init_app(app)
     Migrate(app, db)
     CORS(app)
+    limiter.init_app(app)
     
     # Blueprints
     app.register_blueprint(main_bp)

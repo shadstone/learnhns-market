@@ -18,11 +18,18 @@ from app.models import (
     PendingListing,
     db,
 )
-from app.blueprints.api import _market_index_health
+from app.blueprints.api import PROOF_UPLOAD_RATE_LIMIT, _market_index_health
 from app import marketplace_indexer
 
 
 class MarketIndexHealthTests(unittest.TestCase):
+    def test_proof_upload_limit_supports_large_bob_batches(self):
+        count, period, unit = PROOF_UPLOAD_RATE_LIMIT.split()
+
+        self.assertEqual(period, 'per')
+        self.assertEqual(unit, 'hour')
+        self.assertGreaterEqual(int(count), 100)
+
     def test_fresh_caught_up_worker_is_healthy(self):
         now = datetime(2026, 7, 25, 12, 0, 0)
         progress = SimpleNamespace(
@@ -139,6 +146,7 @@ class BrowseSnapshotTests(unittest.TestCase):
             'UPLOAD_FOLDER': self.tempdir.name,
             'WTF_CSRF_ENABLED': False,
         })
+        self.assertIn('limiter', self.app.extensions)
         with self.app.app_context():
             db.create_all()
             db.session.add(Listing(
@@ -358,6 +366,16 @@ class BrowseSnapshotTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.get_json())
         fetch_coin.assert_called_once_with(lock_hash, 0)
         fetch_name.assert_called_once_with('verifiedlisting')
+
+    def test_proof_upload_limit_allows_more_than_ten_requests(self):
+        for _ in range(11):
+            response = self.client.post(
+                '/api/upload-proof',
+                environ_base={'REMOTE_ADDR': '203.0.113.10'},
+            )
+
+            self.assertEqual(response.status_code, 400, response.get_json())
+            self.assertEqual(response.get_json(), {'error': 'No proof file'})
 
     def test_sale_recording_verifies_spending_transaction(self):
         sale_tx_hash = '9' * 64
