@@ -28,4 +28,4 @@ jobs:
           docker run --rm
           -e DATABASE_URL=sqlite:////tmp/learnhns-migration-test.db
           learnhns-market-ci
-          sh -lc 'flask db upgrade && test "$(flask db current | tail -1)" = "4d7e9a1b2c3f (head)"'
+          sh -lc 'flask db upgrade && test "$(flask db current | tail -1)" = "9d5a7c1e4b20 (head)"'
