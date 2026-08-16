@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 
-{% block title %}Admin Import - LearnHNS Market{% endblock %}
+{% block title %}Marketplace Admin - LearnHNS Market{% endblock %}
 
 {% block content %}
 <div class="max-w-4xl mx-auto">
   <div class="bg-white rounded-lg shadow p-8">
     <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-8">
       <div>
-        <h1 class="text-4xl font-bold text-gray-900 mb-3">Admin Import</h1>
-        <p class="text-lg text-gray-600">Import community-observed Handshake names for the expiring-name watcher.</p>
+        <h1 class="text-4xl font-bold text-gray-900 mb-3">Marketplace Admin</h1>
+        <p class="text-lg text-gray-600">Manage featured inventory and import community-observed names.</p>
       </div>
       <a href="{{ url_for('main.status') }}" class="inline-flex justify-center px-5 py-3 border border-blue-600 text-blue-600 rounded-lg font-semibold hover:bg-blue-50">View Status</a>
     </div>
@@ -28,6 +28,7 @@
     <div id="result" class="hidden rounded-lg border p-4 text-sm whitespace-pre-wrap mb-6"></div>
 
     <div id="import-step" class="hidden space-y-6">
+      <h2 class="text-2xl font-bold text-gray-900">Expiring-name import</h2>
       <div class="p-4 rounded-lg bg-blue-50 border border-blue-100 text-blue-900">
         Accepted formats: one name per line, comma-separated CSV, or JSON such as <code>["alpha", "beta"]</code> or <code>{"names": ["alpha"]}</code>. Use root names only, without trailing slash or dot.
       </div>
@@ -54,6 +55,45 @@ alpha42"></textarea>
         <button id="clear-btn" class="px-6 py-3 border border-gray-300 rounded-lg font-semibold text-gray-700 hover:bg-gray-50">Clear</button>
       </div>
     </div>
+
+    <div id="feature-step" class="mt-10 hidden border-t border-gray-200 pt-8">
+      <div class="mb-5">
+        <h2 class="text-2xl font-bold text-gray-900">Featured web listings</h2>
+        <p class="mt-1 text-sm text-gray-600">Only active, unexpired listings can be featured. This controls the website only and does not imply an endorsement or alter wallet verification.</p>
+      </div>
+      <div class="grid gap-4 md:grid-cols-2">
+        <label class="block md:col-span-2">
+          <span class="mb-2 block text-sm font-semibold text-gray-800">Handshake name</span>
+          <input id="feature-name" type="text" maxlength="63" placeholder="example" class="w-full rounded-lg border border-gray-300 px-4 py-3 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </label>
+        <label class="block">
+          <span class="mb-2 block text-sm font-semibold text-gray-800">Public label</span>
+          <input id="feature-label" type="text" maxlength="40" value="Featured" class="w-full rounded-lg border border-gray-300 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </label>
+        <label class="block">
+          <span class="mb-2 block text-sm font-semibold text-gray-800">Rank (lower appears first)</span>
+          <input id="feature-rank" type="number" min="0" max="10000" value="0" class="w-full rounded-lg border border-gray-300 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </label>
+        <label class="block">
+          <span class="mb-2 block text-sm font-semibold text-gray-800">Starts at (optional, UTC)</span>
+          <input id="feature-starts" type="datetime-local" class="w-full rounded-lg border border-gray-300 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </label>
+        <label class="block">
+          <span class="mb-2 block text-sm font-semibold text-gray-800">Ends at (optional, UTC)</span>
+          <input id="feature-ends" type="datetime-local" class="w-full rounded-lg border border-gray-300 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </label>
+        <label class="block md:col-span-2">
+          <span class="mb-2 block text-sm font-semibold text-gray-800">Private admin note</span>
+          <textarea id="feature-note" rows="3" maxlength="1000" class="w-full rounded-lg border border-gray-300 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+        </label>
+      </div>
+      <div class="mt-5 flex flex-wrap gap-3">
+        <button id="feature-save-btn" type="button" class="rounded-lg bg-indigo-600 px-6 py-3 font-semibold text-white hover:bg-indigo-700">Feature on web</button>
+        <button id="feature-remove-btn" type="button" class="rounded-lg border border-gray-300 px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50">Remove feature</button>
+        <button id="feature-refresh-btn" type="button" class="rounded-lg border border-gray-300 px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50">Refresh list</button>
+      </div>
+      <div id="featured-list" class="mt-6 space-y-3"></div>
+    </div>
   </div>
 </div>
 
@@ -62,6 +102,7 @@ alpha42"></textarea>
   const storageKey = 'learnhns_market_admin_token';
   const tokenStep = document.getElementById('token-step');
   const importStep = document.getElementById('import-step');
+  const featureStep = document.getElementById('feature-step');
   const tokenInput = document.getElementById('admin-token');
   const fileInput = document.getElementById('names-file');
   const textInput = document.getElementById('names-text');
@@ -82,6 +123,7 @@ alpha42"></textarea>
     window.localStorage.removeItem(storageKey);
     tokenInput.value = '';
     importStep.classList.add('hidden');
+    featureStep.classList.add('hidden');
     showResult('Saved admin key cleared.', true);
   });
 
@@ -120,10 +162,94 @@ alpha42"></textarea>
     }
   });
 
+  document.getElementById('feature-save-btn').addEventListener('click', () => saveFeatured(true));
+  document.getElementById('feature-remove-btn').addEventListener('click', () => saveFeatured(false));
+  document.getElementById('feature-refresh-btn').addEventListener('click', loadFeatured);
+
   function showImportStep() {
     tokenStep.classList.add('hidden');
     importStep.classList.remove('hidden');
+    featureStep.classList.remove('hidden');
     result.classList.add('hidden');
+    loadFeatured();
+  }
+
+  async function saveFeatured(featuredWeb) {
+    const token = tokenInput.value.trim() || window.localStorage.getItem(storageKey) || '';
+    const name = document.getElementById('feature-name').value.trim().toLowerCase().replace(/\/$/, '');
+    if (!token) return showResult('Please enter the admin API key first.', false);
+    if (!name) return showResult('Enter the active listing name.', false);
+
+    const payload = {
+      featuredWeb,
+      featuredLabel: document.getElementById('feature-label').value.trim() || 'Featured',
+      featuredRank: Number(document.getElementById('feature-rank').value || 0),
+      featuredStartsAt: document.getElementById('feature-starts').value || null,
+      featuredEndsAt: document.getElementById('feature-ends').value || null,
+      featuredAdminNote: document.getElementById('feature-note').value.trim(),
+    };
+    showResult(featuredWeb ? `Featuring ${name}/...` : `Removing ${name}/ from featured listings...`, true);
+    try {
+      const res = await fetch(`/api/v2/admin/featured-listings/${encodeURIComponent(name)}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Market-Admin-Token': token},
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `Update failed with ${res.status}`);
+      showResult(`${name}/ ${featuredWeb ? 'is featured on the web' : 'was removed from featured listings'}.`, true);
+      loadFeatured();
+    } catch (err) {
+      showResult(err.message, false);
+    }
+  }
+
+  async function loadFeatured() {
+    const token = tokenInput.value.trim() || window.localStorage.getItem(storageKey) || '';
+    if (!token) return;
+    const container = document.getElementById('featured-list');
+    container.innerHTML = '<p class="text-sm text-gray-500">Loading featured listings...</p>';
+    try {
+      const res = await fetch('/api/v2/admin/featured-listings', {
+        headers: {'X-Market-Admin-Token': token},
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `Load failed with ${res.status}`);
+      const rows = body.featured || [];
+      if (!rows.length) {
+        container.innerHTML = '<p class="rounded-lg bg-gray-50 p-4 text-sm text-gray-600">No listings are configured as featured.</p>';
+        return;
+      }
+      container.innerHTML = rows.map((item) => `
+        <button type="button" data-featured-name="${escapeHtml(item.name)}" class="block w-full rounded-lg border border-gray-200 p-4 text-left hover:border-indigo-300 hover:bg-indigo-50">
+          <span class="flex flex-wrap items-center justify-between gap-2">
+            <strong>${escapeHtml(item.name)}/</strong>
+            <span class="text-sm text-gray-600">rank ${item.featuredRank} · ${escapeHtml(item.featuredLabel)} · ${item.featuredActiveNow ? 'live now' : 'scheduled'}</span>
+          </span>
+        </button>`).join('');
+      container.querySelectorAll('[data-featured-name]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const item = rows.find((row) => row.name === button.dataset.featuredName);
+          if (!item) return;
+          document.getElementById('feature-name').value = item.name;
+          document.getElementById('feature-label').value = item.featuredLabel || 'Featured';
+          document.getElementById('feature-rank').value = item.featuredRank || 0;
+          document.getElementById('feature-starts').value = toLocalInput(item.featuredStartsAt);
+          document.getElementById('feature-ends').value = toLocalInput(item.featuredEndsAt);
+          document.getElementById('feature-note').value = item.featuredAdminNote || '';
+        });
+      });
+    } catch (err) {
+      container.innerHTML = `<p class="rounded-lg bg-red-50 p-4 text-sm text-red-800">${escapeHtml(err.message)}</p>`;
+    }
+  }
+
+  function toLocalInput(value) {
+    return value ? value.slice(0, 16) : '';
+  }
+
+  function escapeHtml(value) {
+    return String(value || '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
   }
 
   function buildPayload(rawText) {

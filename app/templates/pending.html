@@ -31,6 +31,15 @@
         {% endif %}
     </div>
 
+    <div class="mb-6 rounded-md border {% if pending.actionRequired %}border-red-200 bg-red-50 text-red-950{% else %}border-blue-200 bg-blue-50 text-blue-950{% endif %} p-4">
+        <p class="text-xs font-bold uppercase tracking-wider">{{ 'Seller action required' if pending.actionRequired else 'Next step' }}</p>
+        <p class="mt-1 text-lg font-semibold">{{ pending.nextAction }}</p>
+        <p class="mt-1 text-sm">{{ pending.nextActionDetail }}</p>
+        {% if pending.actionRequired %}
+        <a href="https://learnhns.com/start" target="_blank" rel="noopener noreferrer" class="mt-3 inline-block rounded bg-white px-4 py-2 text-sm font-semibold underline">Open Bob LearnHNS guidance</a>
+        {% endif %}
+    </div>
+
     <div class="space-y-3 text-gray-700">
         <p><strong class="text-gray-800">Status:</strong> {{ pending.status }}</p>
         <p><strong class="text-gray-800">Listing Mode:</strong> {{ pending.listingMode or 'fixed-price' }}</p>

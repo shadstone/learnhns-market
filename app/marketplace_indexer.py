@@ -1,8 +1,12 @@
+import re
 from datetime import datetime
+
+from sqlalchemy import or_
 
 from app.models import (
     db,
     Listing,
+    MarketplaceBlockCheckpoint,
     MarketplaceCovenantEvent,
     MarketplaceIndexerProgress,
     PendingListing,
@@ -18,17 +22,20 @@ from app.blueprints.api import (
 
 
 MARKETPLACE_COVENANT_ACTIONS = {'TRANSFER', 'FINALIZE'}
+HANDSHAKE_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,62}$')
 NAME_RELEVANT_COVENANT_TYPES = {
     9: 'TRANSFER',
     10: 'FINALIZE',
 }
+REORG_CHECKPOINT_LIMIT = 2016
+REORG_MAX_DEPTH = 720
 
 
 def normalize_name(value):
     if not isinstance(value, str):
         return None
     name = value.strip().lower().rstrip('/')
-    return name or None
+    return name if HANDSHAKE_NAME_RE.fullmatch(name) else None
 
 
 def covenant_action(covenant):
@@ -390,14 +397,166 @@ def progress_for(network='main'):
     return progress
 
 
+def mark_progress_failed(error, network='main'):
+    db.session.rollback()
+    progress = progress_for(network)
+    progress.status = 'failed'
+    progress.last_error = str(error)
+    progress.updated_at = datetime.utcnow()
+    db.session.commit()
+    return progress
+
+
+def record_block_checkpoint(height, block_hash_value, network='main'):
+    checkpoint = MarketplaceBlockCheckpoint.query.filter_by(
+        network=network,
+        block_height=height,
+    ).first()
+    if checkpoint is None:
+        checkpoint = MarketplaceBlockCheckpoint(
+            network=network,
+            block_height=height,
+        )
+        db.session.add(checkpoint)
+    checkpoint.block_hash = block_hash_value
+    checkpoint.updated_at = datetime.utcnow()
+    return checkpoint
+
+
+def _rollback_marketplace_reorg(progress, ancestor, network='main'):
+    orphan_events = (
+        MarketplaceCovenantEvent.query
+        .filter(
+            MarketplaceCovenantEvent.network == network,
+            MarketplaceCovenantEvent.source == 'hsd-block',
+            MarketplaceCovenantEvent.block_height > ancestor.block_height,
+        )
+        .all()
+    )
+    orphan_tx_hashes = {event.tx_hash for event in orphan_events}
+    reverted_listings = 0
+    if orphan_tx_hashes:
+        listings = (
+            Listing.query
+            .filter(
+                Listing.status.in_(('sold', 'completed')),
+                or_(
+                    Listing.sale_tx_hash.in_(orphan_tx_hashes),
+                    Listing.transfer_start_tx_hash.in_(orphan_tx_hashes),
+                ),
+            )
+            .all()
+        )
+        for listing in listings:
+            listing.status = 'active'
+            listing.sold_at = None
+            listing.sale_tx_hash = None
+            listing.transfer_start_tx_hash = None
+            if isinstance(listing.proof_json, dict):
+                proof_json = dict(listing.proof_json)
+                proof_json.pop('transferStartTxHash', None)
+                listing.proof_json = proof_json
+            reverted_listings += 1
+
+    deleted_events = len(orphan_events)
+    for event in orphan_events:
+        db.session.delete(event)
+    deleted_checkpoints = (
+        MarketplaceBlockCheckpoint.query
+        .filter(
+            MarketplaceBlockCheckpoint.network == network,
+            MarketplaceBlockCheckpoint.block_height > ancestor.block_height,
+        )
+        .delete(synchronize_session=False)
+    )
+    previous_height = progress.last_indexed_height
+    progress.last_indexed_height = ancestor.block_height
+    progress.target_height = ancestor.block_height
+    progress.status = 'running'
+    progress.last_error = None
+    progress.updated_at = datetime.utcnow()
+    db.session.commit()
+    return {
+        'detected': True,
+        'previousHeight': previous_height,
+        'ancestorHeight': ancestor.block_height,
+        'depth': previous_height - ancestor.block_height,
+        'eventsRemoved': deleted_events,
+        'checkpointsRemoved': deleted_checkpoints,
+        'listingsReverted': reverted_listings,
+    }
+
+
+def reconcile_chain_reorganization(
+    progress,
+    network='main',
+    max_depth=REORG_MAX_DEPTH,
+):
+    height = progress.last_indexed_height
+    if not isinstance(height, int):
+        return {'detected': False, 'checkpointInitialized': False}
+
+    checkpoint = MarketplaceBlockCheckpoint.query.filter_by(
+        network=network,
+        block_height=height,
+    ).first()
+    current_hash = get_block_hash(height)
+    if checkpoint is None:
+        record_block_checkpoint(height, current_hash, network=network)
+        db.session.commit()
+        return {'detected': False, 'checkpointInitialized': True}
+    if checkpoint.block_hash == current_hash:
+        return {'detected': False, 'checkpointInitialized': False}
+
+    candidates = (
+        MarketplaceBlockCheckpoint.query
+        .filter(
+            MarketplaceBlockCheckpoint.network == network,
+            MarketplaceBlockCheckpoint.block_height < height,
+            MarketplaceBlockCheckpoint.block_height >= max(height - max_depth, 0),
+        )
+        .order_by(MarketplaceBlockCheckpoint.block_height.desc())
+        .all()
+    )
+    ancestor = None
+    for candidate in candidates:
+        if get_block_hash(candidate.block_height) == candidate.block_hash:
+            ancestor = candidate
+            break
+
+    if ancestor is None:
+        raise RuntimeError(
+            f'Chain reorganization exceeds the {max_depth}-block checkpoint window at height {height}'
+        )
+
+    return _rollback_marketplace_reorg(progress, ancestor, network=network)
+
+
 def scan_market_blocks(start_height=None, end_height=None, lookback=720, network='main', max_blocks=720):
     chain_height = get_chain_height()
     progress = progress_for(network)
+    reorg = reconcile_chain_reorganization(progress, network=network)
     end = min(end_height or chain_height, chain_height)
 
     if start_height is not None:
         start = start_height
-    elif isinstance(progress.last_indexed_height, int) and progress.last_indexed_height < end:
+    elif isinstance(progress.last_indexed_height, int):
+        if progress.last_indexed_height >= end:
+            now = datetime.utcnow()
+            progress.status = 'watching'
+            progress.target_height = end
+            progress.finished_at = now
+            progress.updated_at = now
+            progress.last_error = None
+            db.session.commit()
+            return {
+                'blocksProcessed': 0,
+                'eventsIndexed': 0,
+                'startHeight': None,
+                'endHeight': end,
+                'observedNames': 0,
+                'reorg': reorg,
+            }
         start = progress.last_indexed_height + 1
     else:
         start = max(0, end - lookback)
@@ -435,6 +594,7 @@ def scan_market_blocks(start_height=None, end_height=None, lookback=720, network
                     network=network,
                     listing_refs=listing_refs,
                 )
+            record_block_checkpoint(height, block_hash_value, network=network)
             progress.last_indexed_height = height
             blocks_processed += 1
             if blocks_processed % 25 == 0:
@@ -444,14 +604,14 @@ def scan_market_blocks(start_height=None, end_height=None, lookback=720, network
         progress.finished_at = datetime.utcnow()
         progress.events_indexed = (progress.events_indexed or 0) + events_indexed
         progress.updated_at = datetime.utcnow()
+        checkpoint_floor = max(progress.last_indexed_height - REORG_CHECKPOINT_LIMIT, 0)
+        MarketplaceBlockCheckpoint.query.filter(
+            MarketplaceBlockCheckpoint.network == network,
+            MarketplaceBlockCheckpoint.block_height < checkpoint_floor,
+        ).delete(synchronize_session=False)
         db.session.commit()
     except Exception as exc:
-        db.session.rollback()
-        progress = progress_for(network)
-        progress.status = 'failed'
-        progress.last_error = str(exc)
-        progress.updated_at = datetime.utcnow()
-        db.session.commit()
+        mark_progress_failed(exc, network=network)
         raise
 
     return {
@@ -460,6 +620,7 @@ def scan_market_blocks(start_height=None, end_height=None, lookback=720, network
         'startHeight': start,
         'endHeight': end,
         'observedNames': len(names),
+        'reorg': reorg,
     }
 
 
@@ -469,6 +630,21 @@ def index_listing_hashes(network='main'):
         for value in (listing.transfer_start_tx_hash, listing.sale_tx_hash):
             if isinstance(value, str) and len(value) == 64:
                 hashes.add(value.lower())
+
+    if hashes:
+        indexed_hashes = {
+            row[0]
+            for row in (
+                db.session.query(MarketplaceCovenantEvent.tx_hash)
+                .filter(
+                    MarketplaceCovenantEvent.network == network,
+                    MarketplaceCovenantEvent.tx_hash.in_(hashes),
+                )
+                .distinct()
+                .all()
+            )
+        }
+        hashes.difference_update(indexed_hashes)
 
     results = []
     for tx_hash_value in sorted(hashes):

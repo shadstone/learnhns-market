@@ -1,0 +1,10 @@
+{
+  "name": "learnhns-market-assets",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.js -i app/static/css/tailwind-input.css -o app/static/css/tailwind.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

@@ -8,3 +8,4 @@ uploads/
 venv/
 env/
 temp-specs/
+node_modules/

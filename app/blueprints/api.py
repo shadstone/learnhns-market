@@ -17,14 +17,17 @@ import os
 import json
 import re
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 
 api_bp = Blueprint('api', __name__)
-limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day"])
+# Only explicitly decorated write/admin routes are limited. Public market reads
+# must remain available without a blanket per-IP cap.
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 SHAKEDEX_TRANSFER_LOCKUP = 288
 PENDING_TERMINAL_STATUSES = {'active', 'cancelled', 'expired', 'failed'}
+PROOF_UPLOAD_RATE_LIMIT = "100 per hour"
 
 
 @api_bp.route('/v2/watchers/counts', methods=['GET'])
@@ -63,6 +66,9 @@ def _bob_auction_from_listing(listing):
         "description": listing.description,
         "createdAt": listing.created_at.isoformat() if listing.created_at else None,
         "expiresAt": expires_at.isoformat() if expires_at else None,
+        "featuredWeb": listing.is_featured_on_web(),
+        "featuredRank": listing.featured_rank,
+        "featuredLabel": listing.featured_label or "Featured",
         "url": f"/listing/{listing.name}",
     }
 
@@ -354,6 +360,7 @@ def _pending_listing_payload(pending, refresh=True):
         "nameState": None,
     }
 
+    action = _pending_listing_action(status_info["status"], status_info.get("blocksUntilFinalize"))
     return {
         "id": f"pending-{pending.id}",
         "name": pending.name,
@@ -372,14 +379,48 @@ def _pending_listing_payload(pending, refresh=True):
         "transferHeight": status_info["transferHeight"],
         "nameState": status_info.get("nameState"),
         "sellerNote": pending.seller_note,
+        "actionRequired": action["required"],
+        "nextAction": action["label"],
+        "nextActionDetail": action["detail"],
         "createdAt": pending.created_at.isoformat() if pending.created_at else None,
         "updatedAt": pending.updated_at.isoformat() if pending.updated_at else None,
         "url": f"/listing/{pending.name}",
     }
 
 
-def _bob_auction_from_pending(pending):
-    payload = _pending_listing_payload(pending)
+def _pending_listing_action(status, blocks_until_finalize=None):
+    if status == 'ready-to-finalize':
+        return {
+            'required': True,
+            'label': 'Finalize and submit in Bob',
+            'detail': 'The seller must open Bob, finalize the Shakedex lock, generate the proof, and submit it to this channel.',
+        }
+    if status == 'transfer-lockup':
+        detail = 'No seller action is required until the Handshake transfer lockup finishes.'
+        if isinstance(blocks_until_finalize, int) and blocks_until_finalize > 0:
+            detail = f'Wait about {blocks_until_finalize} more blocks, then finalize and submit the proof in Bob.'
+        return {'required': False, 'label': 'Wait for lockup', 'detail': detail}
+    if status == 'transfer-unconfirmed':
+        return {
+            'required': False,
+            'label': 'Wait for transfer confirmation',
+            'detail': 'Bob has submitted the transfer; the channel is waiting for it to confirm.',
+        }
+    if status == 'pending-submitted':
+        return {
+            'required': True,
+            'label': 'Check the transfer in Bob',
+            'detail': 'The channel has the pending record but cannot yet verify an active Shakedex transfer for this name.',
+        }
+    return {
+        'required': False,
+        'label': 'Review listing status',
+        'detail': 'Open the seller listing in Bob to review its current Shakedex state.',
+    }
+
+
+def _bob_auction_from_pending(pending, refresh=False):
+    payload = _pending_listing_payload(pending, refresh=refresh)
     return {
         **payload,
         "bids": [],
@@ -395,6 +436,7 @@ def _listing_is_available(listing):
 
 
 def _active_listings_unique_by_name():
+    """Return the database snapshot used by read-only marketplace routes."""
     listings = (
         Listing.query
         .filter_by(status='active')
@@ -404,8 +446,6 @@ def _active_listings_unique_by_name():
     unique = []
     seen_names = set()
     for listing in listings:
-        if _listing_lock_coin_is_spent(listing):
-            continue
         if listing.is_expired() or listing.name in seen_names:
             continue
         unique.append(listing)
@@ -414,15 +454,12 @@ def _active_listings_unique_by_name():
 
 
 def _active_listing_for_name(name):
-    listing = (
+    return (
         Listing.query
         .filter_by(name=name, status='active')
         .order_by(Listing.created_at.desc())
         .first()
     )
-    if _listing_lock_coin_is_spent(listing):
-        return None
-    return listing
 
 
 def _refreshable_listing_for_name(name):
@@ -514,71 +551,6 @@ def _listing_lock_is_current_owner(listing, transfer_status=None):
         return False
 
     return owner_output_index == lock_output_index
-
-
-def _listing_lock_coin_is_spent(listing):
-    if not listing or listing.status != 'active':
-        return False
-
-    tx_hash, output_index = _listing_coin_ref(listing)
-    if not tx_hash:
-        return False
-
-    transfer_status = _name_transfer_status(listing.name)
-    if _listing_lock_is_current_owner(listing, transfer_status=transfer_status):
-        return False
-    if transfer_status.get('status') in {'transfer-lockup', 'ready-to-finalize'}:
-        verified_sale_tx_hash = _find_verified_listing_sale_tx_hash(listing)
-        if not verified_sale_tx_hash:
-            current_app.logger.info(
-                "Keeping Shakedex listing %s active: transfer state does not spend the listing lock coin.",
-                listing.name,
-            )
-            return False
-
-        listing.status = 'sale-pending'
-        listing.transfer_start_tx_hash = verified_sale_tx_hash
-        db.session.commit()
-        current_app.logger.info(
-            "Marked Shakedex listing %s sale-pending because a buyer transfer spends the listing lock coin.",
-            listing.name,
-        )
-        return True
-
-    _, error = _fetch_hsd_coin(tx_hash, output_index)
-    if not error:
-        return False
-
-    status = error[1]
-    if status != 404:
-        current_app.logger.warning(
-            "Could not verify Shakedex listing coin for %s: %s",
-            listing.name,
-            error[0],
-        )
-        return False
-
-    verified_sale_tx_hash = _find_verified_listing_sale_tx_hash(listing)
-    if verified_sale_tx_hash:
-        listing.status = 'sale-pending'
-        listing.transfer_start_tx_hash = verified_sale_tx_hash
-        db.session.commit()
-        current_app.logger.info(
-            "Marked Shakedex listing %s sale-pending because lock coin %s/%s is spent by verified transfer %s.",
-            listing.name,
-            tx_hash,
-            output_index,
-            verified_sale_tx_hash,
-        )
-        return True
-
-    current_app.logger.info(
-        "Keeping Shakedex listing %s active: lock coin %s/%s is unavailable but no verified buyer transfer was found.",
-        listing.name,
-        tx_hash,
-        output_index,
-    )
-    return False
 
 
 def _tx_spends_listing_coin(tx, listing):
@@ -1109,6 +1081,36 @@ def _fetch_hsd_name_info(name):
     if error and error[1] == 404:
         return None, ("Name was not found", 404, error[2])
     return info, error
+
+
+def _verify_listing_proof_on_chain(proof_data):
+    tx_hash = proof_data['lockingTxHash'].lower()
+    output_index = proof_data['lockingOutputIdx']
+    coin, coin_error = _fetch_hsd_coin(tx_hash, output_index)
+    if coin_error:
+        message, status = coin_error[:2]
+        return False, message, status
+
+    name = proof_data['name'].lower().rstrip('/')
+    name_info, name_error = _fetch_hsd_name_info(name)
+    if name_error:
+        message, status = name_error[:2]
+        return False, message, status
+
+    info = name_info.get('info') if isinstance(name_info, dict) else None
+    owner = info.get('owner') if isinstance(info, dict) else None
+    if not isinstance(owner, dict):
+        return False, "HSD did not return a current owner for this name", 409
+
+    owner_hash = str(owner.get('hash') or '').lower()
+    try:
+        owner_index = int(owner.get('index'))
+    except (TypeError, ValueError):
+        owner_index = None
+    if owner_hash != tx_hash or owner_index != output_index:
+        return False, "The proof locking output is not the name's current on-chain owner coin", 409
+
+    return True, coin, 200
 
 
 def _observed_market_names(limit):
@@ -1678,6 +1680,10 @@ def auctions():
     except ValueError:
         return jsonify({"error": "Invalid pagination"}), 400
 
+    availability = request.args.get('availability', request.args.get('status', 'all')).strip().lower()
+    if availability not in {'all', 'available', 'pending'}:
+        return jsonify({"error": "availability must be all, available, or pending"}), 400
+
     active_listings = _active_listings_unique_by_name()
     active_names = {listing.name for listing in active_listings}
     pending_listings = [
@@ -1686,10 +1692,15 @@ def auctions():
         and not pending.is_expired()
         and pending.name not in active_names
     ]
-    all_rows = [
-        *[_bob_auction_from_pending(pending) for pending in pending_listings],
-        *[_bob_auction_from_listing(listing) for listing in active_listings],
-    ]
+    active_rows = [_bob_auction_from_listing(listing) for listing in active_listings]
+    pending_rows = [_bob_auction_from_pending(pending) for pending in pending_listings]
+    if availability == 'available':
+        all_rows = active_rows
+    elif availability == 'pending':
+        all_rows = pending_rows
+    else:
+        # Buyable inventory leads the backwards-compatible combined feed.
+        all_rows = [*active_rows, *pending_rows]
     total = len(all_rows)
     start = (page - 1) * per_page
     end = start + per_page
@@ -1697,7 +1708,104 @@ def auctions():
     return jsonify({
         "total": total,
         "auctions": all_rows[start:end],
+        "availability": availability,
     })
+
+
+@api_bp.route('/v2/admin/featured-listings', methods=['GET'])
+def admin_featured_listings():
+    auth_error = _require_market_admin()
+    if auth_error:
+        return auth_error
+
+    listings = (
+        Listing.query
+        .filter_by(status='active', featured_web=True)
+        .order_by(Listing.featured_rank.asc(), Listing.created_at.desc())
+        .all()
+    )
+    return jsonify({
+        'featured': [_featured_listing_admin_payload(listing) for listing in listings],
+    })
+
+
+@api_bp.route('/v2/admin/featured-listings/<name>', methods=['POST'])
+def update_admin_featured_listing(name):
+    auth_error = _require_market_admin()
+    if auth_error:
+        return auth_error
+
+    normalized_name = str(name or '').strip().lower().rstrip('/')
+    listing = _active_listing_for_name(normalized_name)
+    if not _listing_is_available(listing):
+        return jsonify({'error': 'Only an active, unexpired listing can be featured'}), 404
+
+    data = request.get_json(silent=True) or {}
+    featured_web = data.get('featuredWeb', True)
+    if not isinstance(featured_web, bool):
+        return jsonify({'error': 'featuredWeb must be true or false'}), 400
+
+    try:
+        featured_rank = int(data.get('featuredRank', listing.featured_rank or 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'featuredRank must be an integer'}), 400
+    if featured_rank < 0 or featured_rank > 10000:
+        return jsonify({'error': 'featuredRank must be between 0 and 10000'}), 400
+
+    featured_label = str(data.get('featuredLabel', listing.featured_label or 'Featured')).strip()
+    if not featured_label or len(featured_label) > 40:
+        return jsonify({'error': 'featuredLabel must be between 1 and 40 characters'}), 400
+
+    starts_at, starts_error = _optional_admin_datetime(data.get('featuredStartsAt'))
+    if starts_error:
+        return jsonify({'error': starts_error}), 400
+    ends_at, ends_error = _optional_admin_datetime(data.get('featuredEndsAt'))
+    if ends_error:
+        return jsonify({'error': ends_error}), 400
+    if starts_at and ends_at and ends_at <= starts_at:
+        return jsonify({'error': 'featuredEndsAt must be after featuredStartsAt'}), 400
+
+    admin_note = str(data.get('featuredAdminNote', '')).strip()
+    if len(admin_note) > 1000:
+        return jsonify({'error': 'featuredAdminNote must be 1000 characters or fewer'}), 400
+
+    listing.featured_web = featured_web
+    listing.featured_rank = featured_rank
+    listing.featured_label = featured_label
+    listing.featured_starts_at = starts_at
+    listing.featured_ends_at = ends_at
+    listing.featured_admin_note = admin_note or None
+    db.session.commit()
+    return jsonify({'success': True, 'listing': _featured_listing_admin_payload(listing)})
+
+
+def _optional_admin_datetime(value):
+    if value is None or value == '':
+        return None, None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None, 'Feature dates must use ISO 8601 format'
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed, None
+
+
+def _featured_listing_admin_payload(listing):
+    return {
+        'id': listing.id,
+        'name': listing.name,
+        'status': listing.status,
+        'priceHns': float(listing.price_hns),
+        'featuredWeb': listing.featured_web,
+        'featuredActiveNow': listing.is_featured_on_web(),
+        'featuredRank': listing.featured_rank,
+        'featuredLabel': listing.featured_label or 'Featured',
+        'featuredStartsAt': listing.featured_starts_at.isoformat() if listing.featured_starts_at else None,
+        'featuredEndsAt': listing.featured_ends_at.isoformat() if listing.featured_ends_at else None,
+        'featuredAdminNote': listing.featured_admin_note,
+        'url': f'/listing/{listing.name}',
+    }
 
 
 @api_bp.route('/v2/sales', methods=['GET'])
@@ -1709,10 +1817,6 @@ def sales():
         .order_by(Listing.created_at.desc())
         .all()
     )
-    for listing in listings:
-        _resolve_sale_pending_listing(listing)
-        _repair_sold_listing_sale_tx_hash(listing)
-
     return jsonify({
         "total": len(listings),
         "sales": [
@@ -1974,7 +2078,7 @@ def pending_listings():
     ]
     return jsonify({
         "total": len(pending),
-        "pending": [_pending_listing_payload(row) for row in pending],
+        "pending": [_pending_listing_payload(row, refresh=False) for row in pending],
     })
 
 
@@ -2116,6 +2220,70 @@ def _market_event_payload(event):
     }
 
 
+def _market_index_health(
+    progress,
+    chain_height,
+    *,
+    now=None,
+    stale_seconds=300,
+    max_lag_blocks=6,
+    node_reachable=True,
+):
+    now = now or datetime.utcnow()
+    worker_status = progress.status if progress else 'not-started'
+    updated_at = progress.updated_at if progress else None
+    indexed_height = progress.last_indexed_height if progress else None
+    heartbeat_age_seconds = None
+    if updated_at:
+        heartbeat_age_seconds = max(0, int((now - updated_at).total_seconds()))
+
+    lag_blocks = None
+    if isinstance(chain_height, int) and isinstance(indexed_height, int):
+        lag_blocks = max(chain_height - indexed_height, 0)
+
+    reasons = []
+    if not node_reachable:
+        reasons.append('node-unreachable')
+    if progress is None:
+        reasons.append('not-started')
+    elif worker_status == 'failed':
+        reasons.append('worker-failed')
+    elif worker_status not in {'running', 'watching'}:
+        reasons.append('worker-not-running')
+    if updated_at is None or heartbeat_age_seconds > stale_seconds:
+        reasons.append('stale-heartbeat')
+    if lag_blocks is None:
+        reasons.append('lag-unknown')
+    elif lag_blocks > max_lag_blocks:
+        reasons.append('block-lag')
+
+    healthy = not reasons
+    if healthy:
+        status = 'healthy'
+    elif 'worker-failed' in reasons:
+        status = 'failed'
+    elif 'stale-heartbeat' in reasons:
+        status = 'stale'
+    elif 'block-lag' in reasons:
+        status = 'lagging'
+    else:
+        status = 'unhealthy'
+
+    return {
+        'healthy': healthy,
+        'status': status,
+        'workerStatus': worker_status,
+        'reasons': reasons,
+        'hsdHeight': chain_height,
+        'lastIndexedHeight': indexed_height,
+        'lagBlocks': lag_blocks,
+        'lastHeartbeatAt': updated_at.isoformat() if updated_at else None,
+        'heartbeatAgeSeconds': heartbeat_age_seconds,
+        'staleAfterSeconds': stale_seconds,
+        'maxLagBlocks': max_lag_blocks,
+    }
+
+
 @api_bp.route('/v2/market-index/status', methods=['GET'])
 def market_index_status():
     from app.models import MarketplaceCovenantEvent, MarketplaceIndexerProgress
@@ -2126,16 +2294,26 @@ def market_index_status():
         .order_by(MarketplaceCovenantEvent.block_height.desc())
         .first()
     )
-    return jsonify({
+    chain_payload, chain_status = get_hsd_status_payload()
+    chain_height = chain_payload.get('height') if chain_status == 200 else None
+    health = _market_index_health(
+        progress,
+        chain_height,
+        stale_seconds=current_app.config.get('MARKET_INDEXER_STALE_SECONDS', 300),
+        max_lag_blocks=current_app.config.get('MARKET_INDEXER_MAX_LAG_BLOCKS', 6),
+        node_reachable=chain_status == 200 and chain_payload.get('reachable', False),
+    )
+    payload = {
         "network": "main",
-        "status": progress.status if progress else "not-started",
-        "lastIndexedHeight": progress.last_indexed_height if progress else None,
+        **health,
         "targetHeight": progress.target_height if progress else None,
         "eventsIndexed": progress.events_indexed if progress else 0,
         "lastError": progress.last_error if progress else None,
         "updatedAt": progress.updated_at.isoformat() if progress and progress.updated_at else None,
         "latestEvent": _market_event_payload(latest_event) if latest_event else None,
-    })
+        "nodeError": chain_payload.get('error') if chain_status != 200 else None,
+    }
+    return jsonify(payload), 200 if health['healthy'] else 503
 
 
 @api_bp.route('/v2/market-index/refresh', methods=['POST'])
@@ -2616,7 +2794,7 @@ def refresh_expiring_names():
 
 
 @api_bp.route('/upload-proof', methods=['POST'])
-@limiter.limit("10 per hour")  # per IP
+@limiter.limit(PROOF_UPLOAD_RATE_LIMIT)  # per IP; supports Bob's bulk-submit workflow.
 def upload_proof():
     if 'proof' not in request.files:
         return jsonify({"error": "No proof file"}), 400
@@ -2645,6 +2823,11 @@ def upload_proof():
     if listing_fields['expires_at'] and listing_fields['expires_at'] < datetime.utcnow():
         os.remove(temp_path)
         return jsonify({"error": "This proof has already expired. Please create a fresh proof and upload it again."}), 400
+
+    chain_valid, chain_result, chain_status = _verify_listing_proof_on_chain(proof_data)
+    if not chain_valid:
+        os.remove(temp_path)
+        return jsonify({"error": chain_result}), chain_status
 
     existing_active = (
         Listing.query

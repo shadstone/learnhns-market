@@ -20,6 +20,7 @@ if [ "$PROCESS_TYPE" = "marketplace-indexer" ]; then
     echo "Starting Marketplace Covenant Indexer..."
     exec python scripts/watch-marketplace-covenants.py \
         --poll-seconds "${MARKET_INDEXER_POLL_SECONDS:-60}" \
+        --hash-refresh-seconds "${MARKET_INDEXER_HASH_REFRESH_SECONDS:-3600}" \
         --lookback "${MARKET_INDEXER_LOOKBACK:-720}" \
         --max-blocks "${MARKET_INDEXER_MAX_BLOCKS:-720}"
 fi

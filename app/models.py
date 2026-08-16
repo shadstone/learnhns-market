@@ -27,6 +27,12 @@ class Listing(db.Model):
     cancel_tx_hash = db.Column(db.String(64), nullable=True, index=True)
     expires_at = db.Column(db.DateTime, nullable=True)
     flagged_reason = db.Column(db.Text, nullable=True)
+    featured_web = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    featured_rank = db.Column(db.Integer, default=0, nullable=False)
+    featured_label = db.Column(db.String(40), nullable=True)
+    featured_starts_at = db.Column(db.DateTime, nullable=True)
+    featured_ends_at = db.Column(db.DateTime, nullable=True)
+    featured_admin_note = db.Column(db.Text, nullable=True)
 
     def effective_expires_at(self):
         if self.expires_at:
@@ -48,6 +54,14 @@ class Listing(db.Model):
     def is_expired(self):
         expires_at = self.effective_expires_at()
         return bool(expires_at and expires_at < datetime.utcnow())
+
+    def is_featured_on_web(self, now=None):
+        now = now or datetime.utcnow()
+        return bool(
+            self.featured_web
+            and (self.featured_starts_at is None or self.featured_starts_at <= now)
+            and (self.featured_ends_at is None or self.featured_ends_at > now)
+        )
 
 
 class PendingListing(db.Model):
@@ -174,6 +188,25 @@ class MarketplaceIndexerProgress(db.Model):
     started_at = db.Column(db.DateTime, nullable=True)
     finished_at = db.Column(db.DateTime, nullable=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MarketplaceBlockCheckpoint(db.Model):
+    __tablename__ = 'marketplace_block_checkpoints'
+
+    id = db.Column(db.Integer, primary_key=True)
+    network = db.Column(db.String(20), default='main', nullable=False, index=True)
+    block_height = db.Column(db.Integer, nullable=False, index=True)
+    block_hash = db.Column(db.String(64), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'network',
+            'block_height',
+            name='uq_market_block_checkpoint_network_height',
+        ),
+    )
 
 
 class Account(db.Model):

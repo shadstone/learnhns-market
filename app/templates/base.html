@@ -5,20 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}LearnHNS Market{% endblock %}</title>
     <meta name="description" content="{% block meta_description %}Buy and follow fixed-price Handshake names through LearnHNS Market, a Shakedex channel for Bob LearnHNS and compatible wallets.{% endblock %}">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
-    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16x16.png') }}">
-    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32x32.png') }}">
-    <link rel="icon" type="image/png" sizes="48x48" href="{{ url_for('static', filename='favicon-48x48.png') }}">
-    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='apple-touch-icon.png') }}">
-    <link rel="manifest" href="{{ url_for('static', filename='site.webmanifest') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico', v=static_asset_version) }}">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16x16.png', v=static_asset_version) }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32x32.png', v=static_asset_version) }}">
+    <link rel="icon" type="image/png" sizes="48x48" href="{{ url_for('static', filename='favicon-48x48.png', v=static_asset_version) }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='apple-touch-icon.png', v=static_asset_version) }}">
+    <link rel="manifest" href="{{ url_for('static', filename='site.webmanifest', v=static_asset_version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css', v=static_asset_version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css', v=static_asset_version) }}">
 </head>
 <body class="bg-gray-50 text-gray-900 font-sans antialiased flex flex-col min-h-screen">
     <header class="bg-white shadow-sm border-b border-gray-200">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
             <a href="{{ url_for('main.index') }}" class="flex items-center">
-                <img src="{{ url_for('static', filename='learnhns-dark.png') }}" alt="LearnHNS Market" class="h-10 w-auto object-contain">
+                <img src="{{ url_for('static', filename='learnhns-dark.png', v=static_asset_version) }}" alt="LearnHNS Market" class="h-10 w-auto object-contain">
             </a>
             <nav class="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm sm:gap-5 sm:text-base">
                 <a href="{{ url_for('main.index') }}" class="text-gray-600 hover:text-indigo-600 font-medium">Browse</a>
