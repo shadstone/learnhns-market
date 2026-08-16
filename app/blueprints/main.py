@@ -28,6 +28,7 @@ main_bp = Blueprint('main', __name__)
 @main_bp.route('/')
 def index():
     listings = _active_listings_unique_by_name()
+    active_total = len(listings)
     active_names = {listing.name for listing in listings}
     pending_listings = [
         pending for pending in PendingListing.query.order_by(PendingListing.created_at.desc()).all()
@@ -35,6 +36,14 @@ def index():
         and not pending.is_expired()
         and pending.name not in active_names
     ]
+    pending_total = len(pending_listings)
+    featured_listings = sorted(
+        (listing for listing in listings if listing.is_featured_on_web()),
+        key=lambda listing: (
+            listing.featured_rank,
+            -_datetime_sort_value(listing.created_at or datetime.min),
+        ),
+    )[:6]
     watcher_counts = watcher_counts_for_names(
         [listing.name for listing in listings] + [pending.name for pending in pending_listings]
     )
@@ -50,6 +59,10 @@ def index():
         watcher_counts=watcher_counts,
         hsd_readiness=_hsd_readiness(),
         pagination=pagination,
+        active_total=active_total,
+        pending_total=pending_total,
+        featured_listings=featured_listings,
+        show_featured=_show_featured_market_section(),
     )
 
 
@@ -77,7 +90,8 @@ def _paginated_market_rows(listings, pending_listings, watcher_counts, per_page=
         })
 
     query = request.args.get('q', '').strip().lower()
-    status = request.args.get('status', 'all')
+    status = request.args.get('status', 'available')
+    collection = request.args.get('collection', '').strip().lower()
     punycode = request.args.get('punycode', 'all')
     min_price = _optional_decimal_arg('min')
     max_price = _optional_decimal_arg('max')
@@ -89,6 +103,14 @@ def _paginated_market_rows(listings, pending_listings, watcher_counts, per_page=
         if query and query not in name and query not in _decoded_market_name(name).lower():
             return False
         if status in {'available', 'pending'} and row['kind'] != status:
+            return False
+        if collection == 'short' and len(name) > 3:
+            return False
+        if collection == 'under-500' and (row['price'] is None or row['price'] > Decimal('500')):
+            return False
+        if collection == 'emoji' and not name.startswith('xn--'):
+            return False
+        if collection == 'watched' and watcher_counts.get(row['name'], 0) < 1:
             return False
         if min_price is not None and (row['price'] is None or row['price'] < min_price):
             return False
@@ -144,6 +166,16 @@ def _paginated_market_rows(listings, pending_listings, watcher_counts, per_page=
         'previous_url': _market_page_url(page - 1) if page > 1 else None,
         'next_url': _market_page_url(page + 1) if page < pages else None,
     }
+
+
+def _show_featured_market_section():
+    ignored = {'page', 'view'}
+    meaningful = {
+        key: value
+        for key, value in request.args.items()
+        if key not in ignored and value not in {'', 'available', 'newest', 'all'}
+    }
+    return not meaningful and (_optional_int_arg('page') or 1) == 1
 
 
 def _optional_decimal_arg(name):

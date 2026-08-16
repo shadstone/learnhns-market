@@ -149,7 +149,8 @@ node -e "const {NodeClient, WalletClient} = require('hsd/lib/client'); console.l
         <div class="space-y-4">
             <div>
                 <h3 class="font-semibold text-gray-900">Bob marketplace listings</h3>
-                <code class="block mt-1 rounded bg-gray-100 p-3 text-sm text-gray-800">GET /api/v2/auctions</code>
+                <code class="block mt-1 rounded bg-gray-100 p-3 text-sm text-gray-800">GET /api/v2/auctions?availability=available|pending|all&amp;page=1&amp;per_page=20</code>
+                <p class="mt-2 text-sm text-gray-600">The combined feed remains available for older consumers and lists buyable inventory before pending inventory.</p>
             </div>
             <div>
                 <h3 class="font-semibold text-gray-900">Marketplace fee policy</h3>

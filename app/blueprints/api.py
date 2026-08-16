@@ -17,7 +17,7 @@ import os
 import json
 import re
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 
 api_bp = Blueprint('api', __name__)
@@ -66,6 +66,9 @@ def _bob_auction_from_listing(listing):
         "description": listing.description,
         "createdAt": listing.created_at.isoformat() if listing.created_at else None,
         "expiresAt": expires_at.isoformat() if expires_at else None,
+        "featuredWeb": listing.is_featured_on_web(),
+        "featuredRank": listing.featured_rank,
+        "featuredLabel": listing.featured_label or "Featured",
         "url": f"/listing/{listing.name}",
     }
 
@@ -357,6 +360,7 @@ def _pending_listing_payload(pending, refresh=True):
         "nameState": None,
     }
 
+    action = _pending_listing_action(status_info["status"], status_info.get("blocksUntilFinalize"))
     return {
         "id": f"pending-{pending.id}",
         "name": pending.name,
@@ -375,9 +379,43 @@ def _pending_listing_payload(pending, refresh=True):
         "transferHeight": status_info["transferHeight"],
         "nameState": status_info.get("nameState"),
         "sellerNote": pending.seller_note,
+        "actionRequired": action["required"],
+        "nextAction": action["label"],
+        "nextActionDetail": action["detail"],
         "createdAt": pending.created_at.isoformat() if pending.created_at else None,
         "updatedAt": pending.updated_at.isoformat() if pending.updated_at else None,
         "url": f"/listing/{pending.name}",
+    }
+
+
+def _pending_listing_action(status, blocks_until_finalize=None):
+    if status == 'ready-to-finalize':
+        return {
+            'required': True,
+            'label': 'Finalize and submit in Bob',
+            'detail': 'The seller must open Bob, finalize the Shakedex lock, generate the proof, and submit it to this channel.',
+        }
+    if status == 'transfer-lockup':
+        detail = 'No seller action is required until the Handshake transfer lockup finishes.'
+        if isinstance(blocks_until_finalize, int) and blocks_until_finalize > 0:
+            detail = f'Wait about {blocks_until_finalize} more blocks, then finalize and submit the proof in Bob.'
+        return {'required': False, 'label': 'Wait for lockup', 'detail': detail}
+    if status == 'transfer-unconfirmed':
+        return {
+            'required': False,
+            'label': 'Wait for transfer confirmation',
+            'detail': 'Bob has submitted the transfer; the channel is waiting for it to confirm.',
+        }
+    if status == 'pending-submitted':
+        return {
+            'required': True,
+            'label': 'Check the transfer in Bob',
+            'detail': 'The channel has the pending record but cannot yet verify an active Shakedex transfer for this name.',
+        }
+    return {
+        'required': False,
+        'label': 'Review listing status',
+        'detail': 'Open the seller listing in Bob to review its current Shakedex state.',
     }
 
 
@@ -1642,6 +1680,10 @@ def auctions():
     except ValueError:
         return jsonify({"error": "Invalid pagination"}), 400
 
+    availability = request.args.get('availability', request.args.get('status', 'all')).strip().lower()
+    if availability not in {'all', 'available', 'pending'}:
+        return jsonify({"error": "availability must be all, available, or pending"}), 400
+
     active_listings = _active_listings_unique_by_name()
     active_names = {listing.name for listing in active_listings}
     pending_listings = [
@@ -1650,10 +1692,15 @@ def auctions():
         and not pending.is_expired()
         and pending.name not in active_names
     ]
-    all_rows = [
-        *[_bob_auction_from_pending(pending) for pending in pending_listings],
-        *[_bob_auction_from_listing(listing) for listing in active_listings],
-    ]
+    active_rows = [_bob_auction_from_listing(listing) for listing in active_listings]
+    pending_rows = [_bob_auction_from_pending(pending) for pending in pending_listings]
+    if availability == 'available':
+        all_rows = active_rows
+    elif availability == 'pending':
+        all_rows = pending_rows
+    else:
+        # Buyable inventory leads the backwards-compatible combined feed.
+        all_rows = [*active_rows, *pending_rows]
     total = len(all_rows)
     start = (page - 1) * per_page
     end = start + per_page
@@ -1661,7 +1708,104 @@ def auctions():
     return jsonify({
         "total": total,
         "auctions": all_rows[start:end],
+        "availability": availability,
     })
+
+
+@api_bp.route('/v2/admin/featured-listings', methods=['GET'])
+def admin_featured_listings():
+    auth_error = _require_market_admin()
+    if auth_error:
+        return auth_error
+
+    listings = (
+        Listing.query
+        .filter_by(status='active', featured_web=True)
+        .order_by(Listing.featured_rank.asc(), Listing.created_at.desc())
+        .all()
+    )
+    return jsonify({
+        'featured': [_featured_listing_admin_payload(listing) for listing in listings],
+    })
+
+
+@api_bp.route('/v2/admin/featured-listings/<name>', methods=['POST'])
+def update_admin_featured_listing(name):
+    auth_error = _require_market_admin()
+    if auth_error:
+        return auth_error
+
+    normalized_name = str(name or '').strip().lower().rstrip('/')
+    listing = _active_listing_for_name(normalized_name)
+    if not _listing_is_available(listing):
+        return jsonify({'error': 'Only an active, unexpired listing can be featured'}), 404
+
+    data = request.get_json(silent=True) or {}
+    featured_web = data.get('featuredWeb', True)
+    if not isinstance(featured_web, bool):
+        return jsonify({'error': 'featuredWeb must be true or false'}), 400
+
+    try:
+        featured_rank = int(data.get('featuredRank', listing.featured_rank or 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'featuredRank must be an integer'}), 400
+    if featured_rank < 0 or featured_rank > 10000:
+        return jsonify({'error': 'featuredRank must be between 0 and 10000'}), 400
+
+    featured_label = str(data.get('featuredLabel', listing.featured_label or 'Featured')).strip()
+    if not featured_label or len(featured_label) > 40:
+        return jsonify({'error': 'featuredLabel must be between 1 and 40 characters'}), 400
+
+    starts_at, starts_error = _optional_admin_datetime(data.get('featuredStartsAt'))
+    if starts_error:
+        return jsonify({'error': starts_error}), 400
+    ends_at, ends_error = _optional_admin_datetime(data.get('featuredEndsAt'))
+    if ends_error:
+        return jsonify({'error': ends_error}), 400
+    if starts_at and ends_at and ends_at <= starts_at:
+        return jsonify({'error': 'featuredEndsAt must be after featuredStartsAt'}), 400
+
+    admin_note = str(data.get('featuredAdminNote', '')).strip()
+    if len(admin_note) > 1000:
+        return jsonify({'error': 'featuredAdminNote must be 1000 characters or fewer'}), 400
+
+    listing.featured_web = featured_web
+    listing.featured_rank = featured_rank
+    listing.featured_label = featured_label
+    listing.featured_starts_at = starts_at
+    listing.featured_ends_at = ends_at
+    listing.featured_admin_note = admin_note or None
+    db.session.commit()
+    return jsonify({'success': True, 'listing': _featured_listing_admin_payload(listing)})
+
+
+def _optional_admin_datetime(value):
+    if value is None or value == '':
+        return None, None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None, 'Feature dates must use ISO 8601 format'
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed, None
+
+
+def _featured_listing_admin_payload(listing):
+    return {
+        'id': listing.id,
+        'name': listing.name,
+        'status': listing.status,
+        'priceHns': float(listing.price_hns),
+        'featuredWeb': listing.featured_web,
+        'featuredActiveNow': listing.is_featured_on_web(),
+        'featuredRank': listing.featured_rank,
+        'featuredLabel': listing.featured_label or 'Featured',
+        'featuredStartsAt': listing.featured_starts_at.isoformat() if listing.featured_starts_at else None,
+        'featuredEndsAt': listing.featured_ends_at.isoformat() if listing.featured_ends_at else None,
+        'featuredAdminNote': listing.featured_admin_note,
+        'url': f'/listing/{listing.name}',
+    }
 
 
 @api_bp.route('/v2/sales', methods=['GET'])

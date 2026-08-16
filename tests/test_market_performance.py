@@ -145,6 +145,7 @@ class BrowseSnapshotTests(unittest.TestCase):
             'HSD_HTTP_URL': None,
             'UPLOAD_FOLDER': self.tempdir.name,
             'WTF_CSRF_ENABLED': False,
+            'MARKET_ADMIN_TOKEN': 'test-admin-token',
         })
         self.assertIn('limiter', self.app.extensions)
         with self.app.app_context():
@@ -221,6 +222,71 @@ class BrowseSnapshotTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers['Cache-Control'], 'private, no-store')
+
+    def test_homepage_defaults_to_buyable_inventory_and_links_pending(self):
+        ready = ({'reachable': True, 'progress': 1, 'height': 100}, 200)
+        with patch('app.blueprints.main.get_hsd_status_payload', return_value=ready):
+            response = self.client.get('/')
+            combined = self.client.get('/?status=all')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'fastmarket', response.data)
+        self.assertNotIn(b'data-name="pendingmarket"', response.data)
+        self.assertIn(b'View 1 pending', response.data)
+        self.assertIn(b'data-name="pendingmarket"', combined.data)
+
+    def test_marketplace_api_filters_availability_and_leads_with_active(self):
+        combined = self.client.get('/api/v2/auctions').get_json()
+        available = self.client.get('/api/v2/auctions?availability=available').get_json()
+        pending = self.client.get('/api/v2/auctions?availability=pending').get_json()
+
+        self.assertEqual(combined['auctions'][0]['name'], 'fastmarket')
+        self.assertEqual(combined['total'], 2)
+        self.assertEqual([row['name'] for row in available['auctions']], ['fastmarket'])
+        self.assertEqual([row['name'] for row in pending['auctions']], ['pendingmarket'])
+
+    def test_curated_collection_filters_server_snapshot(self):
+        ready = ({'reachable': True, 'progress': 1, 'height': 100}, 200)
+        with patch('app.blueprints.main.get_hsd_status_payload', return_value=ready):
+            affordable = self.client.get('/?collection=under-500')
+            short = self.client.get('/?collection=short')
+
+        self.assertIn(b'data-name="fastmarket"', affordable.data)
+        self.assertNotIn(b'data-name="fastmarket"', short.data)
+        self.assertIn(b'data-market-total="0"', short.data)
+        self.assertIn(b'No listings match those filters.', short.data)
+
+    def test_admin_can_schedule_and_remove_web_feature(self):
+        self.assertEqual(self.client.get('/api/v2/admin/featured-listings').status_code, 401)
+        headers = {'X-Market-Admin-Token': 'test-admin-token'}
+        featured = self.client.post(
+            '/api/v2/admin/featured-listings/fastmarket',
+            headers=headers,
+            json={
+                'featuredWeb': True,
+                'featuredRank': 2,
+                'featuredLabel': 'Featured',
+                'featuredAdminNote': 'Homepage launch set',
+            },
+        )
+        self.assertEqual(featured.status_code, 200)
+        self.assertTrue(featured.get_json()['listing']['featuredActiveNow'])
+
+        ready = ({'reachable': True, 'progress': 1, 'height': 100}, 200)
+        with patch('app.blueprints.main.get_hsd_status_payload', return_value=ready):
+            homepage = self.client.get('/')
+        self.assertIn(b'Featured names', homepage.data)
+        self.assertIn(b'Homepage launch set', self.client.get(
+            '/api/v2/admin/featured-listings', headers=headers,
+        ).data)
+
+        removed = self.client.post(
+            '/api/v2/admin/featured-listings/fastmarket',
+            headers=headers,
+            json={'featuredWeb': False},
+        )
+        self.assertEqual(removed.status_code, 200)
+        self.assertFalse(removed.get_json()['listing']['featuredWeb'])
 
     def test_homepage_paginates_and_filters_the_full_snapshot(self):
         with self.app.app_context():
