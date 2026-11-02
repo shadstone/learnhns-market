@@ -118,7 +118,27 @@ do not bulk-delete listings as a rollback step.
   writes were made to production. This sample is not a whole-market audit.
 - `git diff --check` and JavaScript syntax validation passed.
 
-Still required before a live rollout: isolated wallet/regtest UX acceptance,
-production-architecture build/CI, current deployment/source recheck and backup.
-No PR, merge, live deployment, node reconfiguration, or message to the reporter
-was performed by this implementation task.
+Release acceptance completed on November 2 before production rollout:
+
+- Native Linux GitHub CI and local linux/amd64 regression/migration/concurrency
+  checks passed (54 tests across the suite and PostgreSQL-specific run).
+- Production and staging PostgreSQL snapshots restored into isolated databases;
+  all 15 table counts matched. The new image accepts the restored production
+  database at the unchanged migration head.
+- Patched Railway staging passed 15 real hsd regtest checks: confirmed pending
+  facts, spoof/replay rejection, signed proof publication and download, valid
+  price reduction, tamper preservation, buyer verification/purchase, cancellation,
+  reopening after sale/cancel rollbacks, and actual name expiry after mining.
+- The run used Bob's Shakedex signer/buyer source and Namehold v0.6.1 API response
+  contracts. It was not a full desktop UI test; released Namehold restricts
+  market writes to mainnet. Early pending publication still requires a retry
+  after confirmation.
+- Staging's old Pinata account was blocked by its plan file limit. Acceptance
+  used the working current market storage configuration temporarily. The
+  production account accepted the diagnostic and two regtest proof pins.
+  No old pins were deleted and no storage-provider migration was included.
+
+Deployment IDs, backup checksums, cleanup, rollback instructions and live
+verification are recorded in hub-learnhns/temp-specs/
+LEARNHNS-MARKET-LISTING-SECURITY-2026-11-02.md. No message to the reporter or
+compatible-wallet catalog endorsement is part of this release.
