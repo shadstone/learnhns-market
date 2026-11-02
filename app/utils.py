@@ -41,7 +41,7 @@ def pin_to_ipfs(file_path: str) -> str:
         "pinata_secret_api_key": current_app.config['PINATA_SECRET_KEY']
     }
     with open(file_path, 'rb') as f:
-        response = requests.post(url, files={'file': f}, headers=headers)
+        response = requests.post(url, files={'file': f}, headers=headers, timeout=20)
     response.raise_for_status()
     return response.json()['IpfsHash']
 
@@ -85,7 +85,8 @@ def validate_shakedex_proof(proof_data: dict) -> tuple[bool, str]:
             return False, "Missing required Shakedex proof fields"
         if proof_data['version'] != 2:
             return False, "Unsupported Shakedex proof version"
-        if not isinstance(proof_data['name'], str) or not proof_data['name']:
+        if (not isinstance(proof_data['name'], str)
+                or not re.fullmatch(r'[a-z0-9_-]{1,63}', proof_data['name'])):
             return False, "Invalid name"
         if not _is_hex(proof_data['lockingTxHash'], 64):
             return False, "Invalid locking transaction hash"
@@ -125,7 +126,7 @@ def validate_shakedex_proof(proof_data: dict) -> tuple[bool, str]:
             return False, "Invalid proof signature"
         if 'fee' in bid and (not isinstance(bid['fee'], int) or bid['fee'] < 0):
             return False, "Invalid fee"
-        if 'expiresAt' in proof_data and (not isinstance(proof_data['expiresAt'], int) or proof_data['expiresAt'] <= 0):
+        if 'expiresAt' in proof_data and (type(proof_data['expiresAt']) is not int or not 0 < proof_data['expiresAt'] <= 253402300799):
             return False, "Invalid listing expiration"
 
         return True, "Valid"

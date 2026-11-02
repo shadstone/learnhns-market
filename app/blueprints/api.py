@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import requests
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 from app.models import db, ExpiringNameWatch, GlobalNameState, Listing, NameIndexerProgress, PendingListing
 from app.utils import (
@@ -13,6 +13,10 @@ from app.utils import (
     send_gfavip_webhook,
 )
 from app.watchers import watcher_counts_for_names
+from app.proof_verifier import verify_proof_signatures
+from app.utils import _address_network
+import tempfile
+import hashlib
 import os
 import json
 import re
@@ -1077,13 +1081,47 @@ def _fetch_explorer_tx(tx_hash):
 
 
 def _fetch_hsd_name_info(name):
-    info, error = _hsd_rpc_request('getnameinfo', [name, True])
+    info, error = _hsd_rpc_request('getnameinfo', [name, False])
     if error and error[1] == 404:
         return None, ("Name was not found", 404, error[2])
     return info, error
 
 
+def _verified_chain(network=None):
+    payload, status = get_hsd_status_payload()
+    actual_network = {'test': 'testnet'}.get(payload.get('network'), payload.get('network'))
+    if status != 200:
+        return None, (payload.get('error', 'HSD is unavailable'), 503)
+    if actual_network not in current_app.config.get('ALLOWED_PROOF_NETWORKS', ['main']):
+        return None, ('HSD network is not allowed by this market', 503)
+    if network is not None and actual_network != network:
+        return None, ('Request network does not match HSD', 409)
+    chain = payload.get('chain') or {}
+    if (not isinstance(chain.get('height'), int) or not chain.get('tip')
+            or chain.get('progress') != 1 or (chain.get('options') or {}).get('spv')):
+        return None, ('A synchronized full HSD node is required', 503)
+    return {**chain, 'network': actual_network}, None
+
+
+def _chain_unchanged(snapshot):
+    current, error = _verified_chain(snapshot['network'])
+    if error:
+        return error
+    if current['tip'] != snapshot['tip']:
+        return ('Chain changed during verification; retry the request', 503)
+    return None
+
+
+def _lock_listing_name(name):
+    # Serialize uploads even when there is no existing row to SELECT FOR UPDATE.
+    if db.engine.dialect.name == 'postgresql':
+        db.session.execute(text('SELECT pg_advisory_xact_lock(hashtext(:name))'), {'name': name})
+
+
 def _verify_listing_proof_on_chain(proof_data):
+    snapshot, error = _verified_chain(_address_network(proof_data['paymentAddr']))
+    if error:
+        return False, error[0], error[1]
     tx_hash = proof_data['lockingTxHash'].lower()
     output_index = proof_data['lockingOutputIdx']
     coin, coin_error = _fetch_hsd_coin(tx_hash, output_index)
@@ -1110,6 +1148,12 @@ def _verify_listing_proof_on_chain(proof_data):
     if owner_hash != tx_hash or owner_index != output_index:
         return False, "The proof locking output is not the name's current on-chain owner coin", 409
 
+    valid, message, status = verify_proof_signatures(proof_data, coin, snapshot['network'])
+    if not valid:
+        return False, message, status
+    error = _chain_unchanged(snapshot)
+    if error:
+        return False, error[0], error[1]
     return True, coin, 200
 
 
@@ -1848,8 +1892,8 @@ def record_private_sale():
 
     data = request.get_json(silent=True) or {}
     name = str(data.get('name', request.args.get('name', ''))).strip().lower().rstrip('/')
-    if not name:
-        return jsonify({"error": "name is required"}), 400
+    if not re.fullmatch(r'[a-z0-9_-]{1,63}', name):
+        return jsonify({'error': 'A valid Handshake name is required'}), 400
 
     sale_tx_hash, sale_hash_error = _validate_hex_hash(
         data.get('saleTxHash', request.args.get('saleTxHash')),
@@ -2086,12 +2130,14 @@ def pending_listings():
 @limiter.limit("20 per hour")
 def create_pending_listing():
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
     name = str(data.get('name', '')).strip().lower().rstrip('/')
     network = str(data.get('network', 'main')).strip().lower()
     transfer_tx_hash = str(data.get('transferTxHash', data.get('transfer_tx_hash', ''))).strip().lower()
 
-    if not name:
-        return jsonify({"error": "name is required"}), 400
+    if not re.fullmatch(r'[a-z0-9_-]{1,63}', name):
+        return jsonify({'error': 'A valid Handshake name is required'}), 400
     if network not in {'main', 'testnet', 'regtest', 'simnet'}:
         return jsonify({"error": "network is invalid"}), 400
     if len(transfer_tx_hash) != 64 or any(c not in '0123456789abcdef' for c in transfer_tx_hash):
@@ -2106,40 +2152,60 @@ def create_pending_listing():
         if transfer_output_idx < 0:
             return jsonify({"error": "transferOutputIdx must be non-negative"}), 400
 
-    expected_price = data.get('expectedPrice', data.get('expected_price'))
-    if expected_price in ('', None):
-        expected_price = None
-    else:
-        try:
-            expected_price = int(expected_price)
-        except (TypeError, ValueError):
-            return jsonify({"error": "expectedPrice must be an integer in base HNS units"}), 400
-        if expected_price < 0:
-            return jsonify({"error": "expectedPrice must be non-negative"}), 400
+    snapshot, error = _verified_chain(network)
+    if error:
+        return jsonify({'error': error[0]}), error[1]
+    name_result, error = _fetch_hsd_name_info(name)
+    if error:
+        return jsonify({'error': error[0]}), error[1]
+    info = name_result.get('info') if isinstance(name_result, dict) else None
+    owner = info.get('owner') if isinstance(info, dict) else None
+    if (not isinstance(owner, dict) or owner.get('hash') != transfer_tx_hash
+            or not isinstance(owner.get('index'), int)
+            or not isinstance(info.get('transfer'), int) or info['transfer'] <= 0):
+        return jsonify({'error': 'The referenced TRANSFER is not the current name owner'}), 409
+    if transfer_output_idx is not None and transfer_output_idx != owner['index']:
+        return jsonify({'error': 'transferOutputIdx does not match the current owner'}), 409
+    transfer_output_idx = owner['index']
+    coin, error = _fetch_hsd_coin(transfer_tx_hash, transfer_output_idx)
+    if error:
+        return jsonify({'error': error[0]}), error[1]
+    covenant = coin.get('covenant', {}) if isinstance(coin, dict) else {}
+    if (covenant.get('type') != 9 or type(coin.get('height')) is not int
+            or coin['height'] < 0 or coin.get('hash') != transfer_tx_hash
+            or coin.get('index') != transfer_output_idx
+            or (covenant.get('items') or [None])[0] != hashlib.sha3_256(name.encode('ascii')).hexdigest()):
+        return jsonify({'error': 'Current owner must be a confirmed unspent TRANSFER'}), 409
+    error = _chain_unchanged(snapshot)
+    if error:
+        return jsonify({'error': error[0]}), error[1]
 
+    _lock_listing_name(name)
     pending = PendingListing.query.filter_by(name=name, network=network).first()
-    if pending is None:
-        pending = PendingListing(name=name, network=network, transfer_tx_hash=transfer_tx_hash)
+    if pending is not None:
+        if (pending.transfer_tx_hash != transfer_tx_hash
+                or pending.transfer_output_idx not in (None, transfer_output_idx)):
+            return jsonify({'error': 'Pending listing already belongs to a different TRANSFER'}), 409
+        # Transaction references are public. Retries cannot change metadata,
+        # revive a terminal row, or extend its lifetime.
+        return jsonify({'success': True, 'replayed': True,
+                        'pending': _pending_listing_payload(pending, refresh=False)}), 200
 
-    pending.transfer_tx_hash = transfer_tx_hash
-    pending.transfer_output_idx = transfer_output_idx
-    pending.lock_script_addr = data.get('lockScriptAddr', data.get('lock_script_addr'))
-    pending.listing_mode = data.get('listingMode', data.get('listing_mode')) or 'fixed-price'
-    pending.expected_price = expected_price
-    pending.seller_note = sanitize_html(data.get('sellerNote', data.get('seller_note', '')))
-    pending.status = 'pending-submitted'
-
+    # Public discovery is permissionless, but must contain chain facts only.
+    # Expected price, note, mode and lock address cannot be authenticated by a
+    # public transfer reference. Signed final proofs supply the actual price.
+    pending = PendingListing(name=name, network=network,
+                             transfer_tx_hash=transfer_tx_hash,
+                             transfer_output_idx=transfer_output_idx,
+                             status='pending-submitted')
     try:
         db.session.add(pending)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return jsonify({"error": "A pending listing with that transferTxHash already exists"}), 409
-
-    return jsonify({
-        "success": True,
-        "pending": _pending_listing_payload(pending),
-    }), 201
+        return jsonify({'error': 'Pending listing already exists; retry'}), 409
+    return jsonify({'success': True,
+                    'pending': _pending_listing_payload(pending, refresh=False)}), 201
 
 
 @api_bp.route('/v2/hsd/status', methods=['GET'])
@@ -2421,65 +2487,191 @@ def coin_lookup(tx_hash, output_index):
     })
 
 
+def _canonical_listing_spend(listing, tx_hash, network, name_info):
+    # Do not use explorer HTML or a client-declared outcome as chain evidence.
+    tx, error = _fetch_hsd_tx(tx_hash)
+    if error and error[1] == 404:
+        # Production can run without indexTX. Use a bounded canonical block
+        # lookup when current name state or our event index supplies a height.
+        # Cached event JSON is never itself accepted as transaction evidence.
+        owner = (name_info or {}).get('owner') or {}
+        height = (name_info or {}).get('transfer') if owner.get('hash') == tx_hash else None
+        if type(height) is not int or height <= 0:
+            from app.models import MarketplaceCovenantEvent
+            event = MarketplaceCovenantEvent.query.filter_by(
+                network=network, name=listing.name, tx_hash=tx_hash).filter(
+                    MarketplaceCovenantEvent.block_height.isnot(None)).order_by(
+                        MarketplaceCovenantEvent.block_height.desc()).first()
+            height = event.block_height if event else None
+        if type(height) is int and height >= 0:
+            block, block_error = _hsd_request(f'/block/{height}')
+            if not block_error and isinstance(block, dict) and block.get('height') == height:
+                tx = next((entry for entry in block.get('txs', [])
+                           if isinstance(entry, dict) and entry.get('hash') == tx_hash), None)
+                if tx:
+                    tx = {**tx, 'height': height, 'block': block.get('hash')}
+                    error = None
+    if error:
+        return None, ('HSD cannot verify the spending transaction or its canonical block', 503)
+    if not isinstance(tx, dict) or tx.get('hash') != tx_hash or not _tx_spends_listing_coin(tx, listing):
+        return None, ('Transaction does not spend this listing lock', 409)
+    height = tx.get('height')
+    if type(height) is not int or height < 0 or not tx.get('block'):
+        return None, ('Spending transaction is not confirmed', 409)
+    block_hash, error = _hsd_rpc_request('getblockhash', [height])
+    if error:
+        return None, ('Cannot verify the canonical transaction block', 503)
+    if block_hash != tx['block']:
+        return None, ('Spending transaction is no longer on the current chain', 409)
+    outputs = tx.get('outputs') or []
+    name_hash = hashlib.sha3_256(listing.name.encode('ascii')).hexdigest()
+    transfers = [output for output in outputs if isinstance(output, dict)
+                 and (output.get('covenant') or {}).get('type') == 9
+                 and ((output.get('covenant') or {}).get('items') or [None])[0] == name_hash]
+    if not transfers:
+        return None, ('Spend is not a TRANSFER of this name', 409)
+    proof = listing.proof_json or {}
+    # Under SINGLEREVERSE the seller payment is selected from the end by the
+    # lock input index, so an unrelated payment elsewhere is not evidence.
+    lock_hash, lock_index = _listing_coin_ref(listing)
+    input_index = next(index for index, item in enumerate(tx['inputs'])
+                       if (item.get('prevout') or {}).get('hash') == lock_hash
+                       and (item.get('prevout') or {}).get('index') == lock_index)
+    if input_index >= len(outputs):
+        return None, ('Spending transaction has no corresponding payment output', 409)
+    payment = outputs[len(outputs) - 1 - input_index]
+    bids = proof.get('data') or []
+    prices = {bid.get('price') for bid in bids if isinstance(bid, dict)}
+    sold = (payment.get('address') == proof.get('paymentAddr')
+            and payment.get('value') in prices
+            and (payment.get('covenant') or {}).get('type') == 0)
+    return 'sold' if sold else 'cancelled', None
+
+
+def _clear_listing_outcome(listing):
+    listing.sold_at = None
+    listing.sale_tx_hash = None
+    listing.transfer_start_tx_hash = None
+    listing.cancelled_at = None
+    listing.cancel_tx_hash = None
+    if isinstance(listing.proof_json, dict):
+        proof = dict(listing.proof_json)
+        proof.pop('transferStartTxHash', None)
+        proof.pop('saleClaimedWithoutTx', None)
+        listing.proof_json = proof
+
+
+def _status_response(listing, previous_status):
+    return jsonify({'status': listing.status, 'previousStatus': previous_status,
+                    'sold': listing.status == 'sold',
+                    'cancelled': listing.status == 'cancelled',
+                    'expired': listing.status == 'expired',
+                    'reopened': previous_status != 'active' and listing.status == 'active',
+                    'saleTxHash': listing.sale_tx_hash,
+                    'soldAt': listing.sold_at.isoformat() if listing.sold_at else None,
+                    'cancelledAt': listing.cancelled_at.isoformat() if listing.cancelled_at else None,
+                    'transferStartTxHash': listing.transfer_start_tx_hash,
+                    'cancelTxHash': listing.cancel_tx_hash,
+                    'url': f'/listing/{listing.name}'})
+
+
 @api_bp.route('/v2/listings/<name>/refresh-status', methods=['GET', 'POST'])
+@limiter.limit('100 per hour')
 def refresh_listing_status(name):
     normalized_name = name.lower().rstrip('/')
-
     data = request.get_json(silent=True) or {}
-    request_values = {**request.args.to_dict(), **data}
-    sale_tx_hash, sale_hash_error = _validate_hex_hash(
-        request_values.get('saleTxHash', request_values.get('sale_tx_hash')),
-        'saleTxHash',
-    )
-    if sale_hash_error:
-        message, status = sale_hash_error
-        return jsonify({"error": message}), status
-
-    transfer_start_tx_hash, transfer_hash_error = _validate_hex_hash(
-        request_values.get('transferStartTxHash', request_values.get('transfer_start_tx_hash')),
-        'transferStartTxHash',
-    )
-    if transfer_hash_error:
-        message, status = transfer_hash_error
-        return jsonify({"error": message}), status
-
-    cancel_tx_hash, cancel_hash_error = _validate_hex_hash(
-        request_values.get('cancelTxHash', request_values.get('cancel_tx_hash')),
-        'cancelTxHash',
-    )
-    if cancel_hash_error:
-        message, status = cancel_hash_error
-        return jsonify({"error": message}), status
-
-    outcome = str(request_values.get('outcome', request_values.get('status', 'sold' if sale_tx_hash else 'refresh'))).strip().lower()
-    if outcome in {'cancelled', 'canceled', 'cancel'}:
-        if cancel_tx_hash:
-            listing, payload, status = _refreshable_listing_for_spend(normalized_name, cancel_tx_hash)
-            if not listing:
-                return jsonify(payload), status
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
+    values = {**request.args.to_dict(), **data}
+    hashes = {}
+    for key, alias in [('saleTxHash', 'sale_tx_hash'), ('cancelTxHash', 'cancel_tx_hash'),
+                       ('transferStartTxHash', 'transfer_start_tx_hash')]:
+        value, error = _validate_hex_hash(values.get(key, values.get(alias)), key)
+        if error:
+            return jsonify({'error': error[0]}), error[1]
+        hashes[key] = value
+    if hashes['saleTxHash'] and hashes['cancelTxHash']:
+        return jsonify({'error': 'Supply one spending transaction'}), 400
+    outcome = str(values.get('outcome', values.get('status', 'refresh'))).lower()
+    if outcome not in {'refresh', 'sold', 'cancel', 'cancelled', 'canceled', 'expired'}:
+        return jsonify({'error': 'Unsupported outcome'}), 400
+    _lock_listing_name(normalized_name)
+    # Never resurrect a superseded listing. Corrections apply to the latest row.
+    listing = Listing.query.filter_by(name=normalized_name).order_by(
+        Listing.created_at.desc(), Listing.id.desc()).first()
+    if not listing or listing.status not in {'active', 'sale-pending', 'sold', 'cancelled', 'expired'}:
+        return jsonify({'error': 'Listing not found'}), 404
+    previous_status = listing.status
+    snapshot, error = _verified_chain(_address_network((listing.proof_json or {}).get('paymentAddr')))
+    if error:
+        return jsonify({'error': error[0]}), error[1]
+    name_result, error = _fetch_hsd_name_info(normalized_name)
+    if error or not isinstance(name_result, dict) or 'info' not in name_result:
+        return jsonify({'error': 'Cannot verify current name state'}), 503
+    info = name_result['info']
+    if info is not None and not isinstance(info, dict):
+        return jsonify({'error': 'Invalid name state from HSD'}), 503
+    stats = (info or {}).get('stats') or {}
+    remaining = stats.get('blocksUntilExpire')
+    # Raw hsd deliberately returns info:null for an expired name. Do not
+    # interpret a missing key, HTTP 404, or RPC failure as expiry.
+    name_expired = info is None or (type(remaining) is int and remaining <= 0)
+    lock_hash, lock_index = _listing_coin_ref(listing)
+    if lock_hash is None:
+        return jsonify({'error': 'Listing has no valid lock reference'}), 409
+    coin, coin_error = _fetch_hsd_coin(lock_hash, lock_index)
+    if coin_error and coin_error[1] != 404:
+        return jsonify({'error': 'Cannot verify locking coin'}), 503
+    supplied_tx = hashes['saleTxHash'] or hashes['cancelTxHash'] or hashes['transferStartTxHash']
+    recorded_tx = listing.transfer_start_tx_hash or listing.sale_tx_hash or listing.cancel_tx_hash
+    target_status, winning_tx = None, None
+    if not coin_error:
+        if not isinstance(coin, dict):
+            return jsonify({'error': 'Invalid locking coin from HSD'}), 503
+        owner = (info or {}).get('owner') or {}
+        covenant_items = (coin.get('covenant') or {}).get('items') or []
+        if len(covenant_items) > 1 and isinstance((info or {}).get('height'), int):
+            try:
+                old_epoch = int.from_bytes(bytes.fromhex(covenant_items[1]), 'little')
+                name_expired = name_expired or info['height'] > old_epoch
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Invalid coin covenant'}), 503
+        if name_expired or listing.is_expired():
+            target_status = 'expired'
+        elif owner != {'hash': lock_hash, 'index': lock_index}:
+            return jsonify({'error': 'Unspent lock is not the current name owner'}), 409
         else:
-            listing = _refreshable_listing_for_name(normalized_name)
-        if not listing or listing.is_expired():
-            return jsonify({"error": "Listing not found"}), 404
-        _, payload, status = _mark_listing_cancelled_if_spent(listing, cancel_tx_hash)
-        return jsonify(payload), status
-
-    if sale_tx_hash:
-        listing, payload, status = _refreshable_listing_for_spend(normalized_name, sale_tx_hash)
-        if not listing:
-            return jsonify(payload), status
+            valid, message, status = verify_proof_signatures(listing.proof_json, coin, snapshot['network'])
+            if not valid:
+                return jsonify({'error': message}), status
+            if outcome == 'expired':
+                return jsonify({'error': 'HSD does not show an expired name'}), 409
+            target_status = 'active'
+    elif name_expired and previous_status in {'active', 'sale-pending', 'expired'}:
+        target_status = 'expired'
     else:
-        listing = _refreshable_listing_for_name(normalized_name)
-
-    if not listing or listing.is_expired():
-        return jsonify({"error": "Listing not found"}), 404
-
-    _, payload, status = _mark_listing_sold_if_spent(
-        listing,
-        sale_tx_hash or None,
-        transfer_start_tx_hash or None,
-    )
-    return jsonify(payload), status
+        candidate = supplied_tx or recorded_tx or ((info or {}).get('owner') or {}).get('hash')
+        if not candidate:
+            return jsonify({'error': 'A confirmed spending transaction is required'}), 409
+        target_status, error = _canonical_listing_spend(listing, candidate, snapshot['network'], info)
+        if error:
+            return jsonify({'error': error[0]}), error[1]
+        winning_tx = candidate
+    error = _chain_unchanged(snapshot)
+    if error:
+        return jsonify({'error': error[0]}), error[1]
+    if target_status != previous_status or (winning_tx and winning_tx != recorded_tx):
+        _clear_listing_outcome(listing)
+        listing.status = target_status
+        if target_status == 'sold':
+            listing.sale_tx_hash = winning_tx
+            listing.transfer_start_tx_hash = winning_tx
+            listing.sold_at = datetime.utcnow()
+        elif target_status == 'cancelled':
+            listing.cancel_tx_hash = winning_tx
+            listing.cancelled_at = datetime.utcnow()
+        db.session.commit()
+    return _status_response(listing, previous_status)
 
 
 @api_bp.route('/v2/names/<name>/transfer-status', methods=['GET'])
@@ -2804,13 +2996,14 @@ def upload_proof():
     gfavip_user_id = request.form.get('gfavip_user_id')  # optional
     
     # Save temp
-    temp_path = os.path.join(current_app.config['UPLOAD_FOLDER'], file.filename)
+    with tempfile.NamedTemporaryFile(dir=current_app.config['UPLOAD_FOLDER'], suffix='.json', delete=False) as temporary:
+        temp_path = temporary.name
     file.save(temp_path)
     
     try:
         with open(temp_path) as f:
             proof_data = json.load(f)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         os.remove(temp_path)
         return jsonify({"error": "Invalid JSON format"}), 400
     
@@ -2819,6 +3012,31 @@ def upload_proof():
         os.remove(temp_path)
         return jsonify({"error": msg}), 400
     
+    # Keep protocol fields only. Client JSON must not inject internal sale
+    # bookkeeping flags or make equivalent proofs evade replay handling.
+    proof_data = {key: proof_data[key] for key in (
+        'version', 'name', 'lockingTxHash', 'lockingOutputIdx', 'publicKey',
+        'paymentAddr', 'feeAddr', 'expiresAt', 'data') if key in proof_data}
+    proof_data['data'] = [{key: proof_data['data'][0][key]
+                           for key in ('price', 'lockTime', 'signature', 'fee')
+                           if key in proof_data['data'][0]}]
+    proof_data['lockingTxHash'] = proof_data['lockingTxHash'].lower()
+    proof_data['publicKey'] = proof_data['publicKey'].lower()
+    proof_data['data'][0]['signature'] = proof_data['data'][0]['signature'].lower()
+    with open(temp_path, 'w') as output:
+        json.dump(proof_data, output)
+
+    # SINGLEREVERSE authenticates the seller payment, not the separate fee
+    # output. Enforce the advertised server fee policy to prevent copied proofs
+    # from redirecting fees or inflating the buyer's required funding.
+    bid = proof_data['data'][0]
+    rate = current_app.config.get('MARKETPLACE_FEE_RATE', 0)
+    fee_address = current_app.config.get('MARKETPLACE_FEE_ADDRESS')
+    expected_fee = bid['price'] * rate // 10000
+    if (bid.get('fee', 0) != expected_fee
+            or (expected_fee > 0 and (not fee_address or proof_data.get('feeAddr') != fee_address))):
+        os.remove(temp_path)
+        return jsonify({'error': 'Proof fee must match this market fee policy'}), 400
     listing_fields = fixed_price_listing_fields(proof_data)
     if listing_fields['expires_at'] and listing_fields['expires_at'] < datetime.utcnow():
         os.remove(temp_path)
@@ -2829,6 +3047,7 @@ def upload_proof():
         os.remove(temp_path)
         return jsonify({"error": chain_result}), chain_status
 
+    _lock_listing_name(listing_fields['name'])
     existing_active = (
         Listing.query
         .filter_by(name=listing_fields['name'], status='active')
@@ -2851,6 +3070,27 @@ def upload_proof():
                     "Cancel it or wait for it to expire before uploading a different listing proof."
                 )
             }), 409
+        if listing_fields['price_hns'] > existing_active.price_hns:
+            os.remove(temp_path)
+            return jsonify({'error': 'A replacement may not raise the price; create a new lock'}), 409
+        old_bid = (existing_proof.get('data') or [{}])[0]
+        if all(str(proof_data['data'][0].get(key, '')).lower() == str(old_bid.get(key, '')).lower()
+               for key in ('price', 'lockTime', 'signature')):
+            os.remove(temp_path)
+            return jsonify({'success': True, 'name': existing_active.name,
+                            'cid': existing_active.ipfs_cid, 'replaced': False,
+                            'replayed': True}), 200
+        # expiresAt and description are not signed by Shakedex. A copied valid
+        # proof must not shorten the listing lifetime or replace seller text.
+        listing_fields['expires_at'] = existing_active.expires_at
+        description = existing_active.description
+        gfavip_user_id = existing_active.gfavip_user_id
+        if 'expiresAt' in existing_proof:
+            proof_data['expiresAt'] = existing_proof['expiresAt']
+        else:
+            proof_data.pop('expiresAt', None)
+        with open(temp_path, 'w') as output:
+            json.dump(proof_data, output)
         replacement_listing = existing_active
 
     # Pin to IPFS after validation/replacement checks so rejected duplicates do not create pins.
@@ -2877,7 +3117,8 @@ def upload_proof():
         if replacement_listing:
             replacement_listing.status = 'archived'
         db.session.add(listing)
-        pending = PendingListing.query.filter_by(name=listing.name).first()
+        pending = PendingListing.query.filter_by(
+            name=listing.name, network=_address_network(proof_data['paymentAddr'])).first()
         if pending:
             pending.status = 'active'
         db.session.commit()

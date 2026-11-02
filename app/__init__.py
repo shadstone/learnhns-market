@@ -32,6 +32,12 @@ def create_app(config_overrides=None):
     if config_overrides:
         app.config.update(config_overrides)
     
+    # requirements.txt provides psycopg2. SQLAlchemy 2.1 defaults an unqualified
+    # PostgreSQL URL to psycopg3, so make the existing driver explicit.
+    database_uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
+    if database_uri.startswith(('postgres://', 'postgresql://')):
+        app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql+psycopg2://' + database_uri.split('://', 1)[1]
+
     db.init_app(app)
     Migrate(app, db)
     CORS(app)

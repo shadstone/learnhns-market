@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
+    MAX_CONTENT_LENGTH = 1024 * 1024  # Bound proof JSON and verifier input.
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-prod')
     APP_ENV = os.getenv('APP_ENV', 'production')
     ALLOWED_PROOF_NETWORKS = [

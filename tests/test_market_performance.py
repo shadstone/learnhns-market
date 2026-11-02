@@ -387,51 +387,24 @@ class BrowseSnapshotTests(unittest.TestCase):
         fetch_coin.assert_called_once_with('a' * 64, 0)
 
     def test_listing_upload_verifies_live_owner_coin(self):
-        lock_hash = '8' * 64
-        proof = {
-            'version': 2,
-            'name': 'verifiedlisting',
-            'lockingTxHash': lock_hash,
-            'lockingOutputIdx': 0,
-            'publicKey': '02' + ('9' * 64),
-            'paymentAddr': 'hs1q' + ('a' * 35),
-            'data': [{
-                'price': 1_000_000,
-                'lockTime': int(datetime.utcnow().timestamp()),
-                'signature': 'a' * 130,
-            }],
-            'expiresAt': int((datetime.utcnow() + timedelta(days=1)).timestamp()),
-        }
-        coin = {'hash': lock_hash, 'index': 0, 'value': 1}
-        name_info = {
-            'info': {
-                'owner': {
-                    'hash': lock_hash,
-                    'index': 0,
-                },
-            },
-        }
-
+        from test_listing_security import fixture
+        signed = fixture()
+        proof, coin = signed['proof'], signed['coin']
+        name_info = {'info': {'owner': {'hash': proof['lockingTxHash'], 'index': 0}}}
+        chain = {'network': 'main', 'chain': {'height': 500, 'tip': 'f' * 64, 'progress': 1}}
         with (
             patch('app.blueprints.api._fetch_hsd_coin', return_value=(coin, None)) as fetch_coin,
             patch('app.blueprints.api._fetch_hsd_name_info', return_value=(name_info, None)) as fetch_name,
+            patch('app.blueprints.api.get_hsd_status_payload', return_value=(chain, 200)),
             patch('app.blueprints.api.pin_to_ipfs', return_value='verified-cid'),
             patch('app.blueprints.api.send_gfavip_webhook'),
         ):
-            response = self.client.post(
-                '/api/upload-proof',
-                data={
-                    'proof': (
-                        BytesIO(json.dumps(proof).encode()),
-                        'verified-proof.json',
-                    ),
-                },
-                content_type='multipart/form-data',
-            )
-
+            response = self.client.post('/api/upload-proof', data={
+                'proof': (BytesIO(json.dumps(proof).encode()), 'verified-proof.json'),
+            })
         self.assertEqual(response.status_code, 201, response.get_json())
-        fetch_coin.assert_called_once_with(lock_hash, 0)
-        fetch_name.assert_called_once_with('verifiedlisting')
+        fetch_coin.assert_called_once_with(proof['lockingTxHash'], 0)
+        fetch_name.assert_called_once_with('security-fixture')
 
     def test_proof_upload_limit_allows_more_than_ten_requests(self):
         for _ in range(11):
@@ -444,59 +417,60 @@ class BrowseSnapshotTests(unittest.TestCase):
             self.assertEqual(response.get_json(), {'error': 'No proof file'})
 
     def test_sale_recording_verifies_spending_transaction(self):
-        sale_tx_hash = '9' * 64
-        tx = {
-            'hash': sale_tx_hash,
-            'inputs': [{
-                'prevout': {
-                    'hash': 'a' * 64,
-                    'index': 0,
-                },
-            }],
-        }
+        import hashlib
+        tx_hash = '9' * 64
+        tx = {'hash': tx_hash, 'height': 400, 'block': 'd' * 64,
+              'inputs': [{'prevout': {'hash': 'a' * 64, 'index': 0}}],
+              'outputs': [{'value': 1, 'address': 'lock', 'covenant': {'type': 9,
+                  'items': [hashlib.sha3_256(b'fastmarket').hexdigest()]}},
+                  {'value': 25000000, 'address': 'hs1qtest', 'covenant': {'type': 0}}]}
+        with self.app.app_context():
+            row = Listing.query.filter_by(name='fastmarket').one()
+            row.proof_json = {**row.proof_json, 'data': [{'price': 25000000}]}
+            db.session.commit()
+        chain = {'network': 'main', 'chain': {'height': 500, 'tip': 'f'*64, 'progress': 1}}
         with (
             patch('app.blueprints.api._fetch_hsd_tx', return_value=(tx, None)) as fetch_tx,
-            patch('app.blueprints.api._index_marketplace_sale_txs'),
+            patch('app.blueprints.api.get_hsd_status_payload', return_value=(chain, 200)),
+            patch('app.blueprints.api._fetch_hsd_name_info', return_value=({'info': {'owner': {'hash': tx_hash, 'index': 0}}}, None)),
+            patch('app.blueprints.api._fetch_hsd_coin', return_value=(None, ('spent', 404, None))),
+            patch('app.blueprints.api._hsd_rpc_request', return_value=('d'*64, None)),
         ):
-            response = self.client.post(
-                '/api/v2/listings/fastmarket/refresh-status',
-                json={'saleTxHash': sale_tx_hash, 'outcome': 'sold'},
-            )
-
+            response = self.client.post('/api/v2/listings/fastmarket/refresh-status',
+                                        json={'saleTxHash': tx_hash, 'outcome': 'sold'})
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertTrue(response.get_json()['sold'])
-        self.assertGreaterEqual(fetch_tx.call_count, 1)
+        fetch_tx.assert_called_once_with(tx_hash)
         with self.app.app_context():
-            self.assertEqual(
-                Listing.query.filter_by(name='fastmarket').one().status,
-                'sold',
-            )
+            self.assertEqual(Listing.query.filter_by(name='fastmarket').one().status, 'sold')
 
     def test_cancellation_recording_verifies_spending_transaction(self):
-        cancel_tx_hash = 'b' * 64
-        tx = {
-            'hash': cancel_tx_hash,
-            'inputs': [{
-                'prevout': {
-                    'hash': 'a' * 64,
-                    'index': 0,
-                },
-            }],
-        }
-        with patch('app.blueprints.api._fetch_hsd_tx', return_value=(tx, None)) as fetch_tx:
-            response = self.client.post(
-                '/api/v2/listings/fastmarket/refresh-status',
-                json={'cancelTxHash': cancel_tx_hash, 'outcome': 'cancelled'},
-            )
-
+        import hashlib
+        tx_hash = '9' * 64
+        tx = {'hash': tx_hash, 'height': 400, 'block': 'd' * 64,
+              'inputs': [{'prevout': {'hash': 'a' * 64, 'index': 0}}],
+              'outputs': [{'value': 1, 'address': 'lock', 'covenant': {'type': 9,
+                  'items': [hashlib.sha3_256(b'fastmarket').hexdigest()]}},
+                  {'value': 1, 'address': 'hs1qtest', 'covenant': {'type': 0}}]}
+        with self.app.app_context():
+            row = Listing.query.filter_by(name='fastmarket').one()
+            row.proof_json = {**row.proof_json, 'data': [{'price': 25000000}]}
+            db.session.commit()
+        chain = {'network': 'main', 'chain': {'height': 500, 'tip': 'f'*64, 'progress': 1}}
+        with (
+            patch('app.blueprints.api._fetch_hsd_tx', return_value=(tx, None)) as fetch_tx,
+            patch('app.blueprints.api.get_hsd_status_payload', return_value=(chain, 200)),
+            patch('app.blueprints.api._fetch_hsd_name_info', return_value=({'info': {'owner': {'hash': tx_hash, 'index': 0}}}, None)),
+            patch('app.blueprints.api._fetch_hsd_coin', return_value=(None, ('spent', 404, None))),
+            patch('app.blueprints.api._hsd_rpc_request', return_value=('d'*64, None)),
+        ):
+            response = self.client.post('/api/v2/listings/fastmarket/refresh-status',
+                                        json={'cancelTxHash': tx_hash, 'outcome': 'cancelled'})
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertTrue(response.get_json()['cancelled'])
-        self.assertGreaterEqual(fetch_tx.call_count, 1)
+        fetch_tx.assert_called_once_with(tx_hash)
         with self.app.app_context():
-            self.assertEqual(
-                Listing.query.filter_by(name='fastmarket').one().status,
-                'cancelled',
-            )
+            self.assertEqual(Listing.query.filter_by(name='fastmarket').one().status, 'cancelled')
 
     def test_transfer_status_verifies_live_chain_and_name_state(self):
         with (
