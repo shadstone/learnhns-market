@@ -1,4 +1,5 @@
 """Bounded smoke check for compose.regtest.yaml; no production URLs or funds."""
+from http.client import HTTPException
 import base64
 import json
 import time
@@ -24,7 +25,7 @@ def ready(url):
             if result.get('network') == 'regtest':
                 return result
             raise AssertionError('Sandbox must report regtest')
-        except URLError:
+        except (URLError, ConnectionError, TimeoutError, HTTPException):
             time.sleep(1)
     raise RuntimeError('Regtest sandbox did not become ready')
 
