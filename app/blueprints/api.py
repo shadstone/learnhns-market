@@ -13,7 +13,8 @@ from app.utils import (
     send_gfavip_webhook,
 )
 from app.watchers import watcher_counts_for_names
-from app.proof_verifier import verify_proof_signatures
+from app.proof_verifier import verify_proof_signatures, verify_renewal_signature
+from app.listing_renewal import renewal_digest, MAX_RENEWAL_SECONDS
 from app.utils import _address_network
 import tempfile
 import hashlib
@@ -2985,6 +2986,93 @@ def refresh_expiring_names():
     return jsonify(result)
 
 
+def _expiry_timestamp(listing):
+    # Database datetimes are naive UTC, regardless of the server's local TZ.
+    from calendar import timegm
+    return timegm(listing.expires_at.utctimetuple()) if listing.expires_at else None
+
+
+def _expiry_upload_result(listing, requested_expiry):
+    actual = _expiry_timestamp(listing)
+    ignored = requested_expiry != actual
+    return {'expiresAt': actual, 'expiryChangeIgnored': ignored,
+            'renewalRequired': ignored and type(requested_expiry) is int and actual is not None and requested_expiry > actual,
+            'renewalEndpoint': f'/api/v2/listings/{listing.name}/renew'}
+
+
+@api_bp.route('/v2/listings/<name>/renew', methods=['POST'])
+@limiter.limit('20 per hour')
+def renew_listing(name):
+    name = name.lower().rstrip('/')
+    data = request.get_json(silent=True)
+    if not re.fullmatch(r'[a-z0-9_-]{1,63}', name) or not isinstance(data, dict):
+        return jsonify({'error': 'Valid name and JSON object required'}), 400
+    network = data.get('network')
+    tx_hash = data.get('lockingTxHash')
+    index = data.get('lockingOutputIdx')
+    previous, expiry = data.get('previousExpiresAt'), data.get('expiresAt')
+    signature = data.get('signature')
+    if (not isinstance(network, str) or network not in {'main', 'testnet', 'regtest', 'simnet'}
+            or not isinstance(tx_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', tx_hash)
+            or type(index) is not int or not 0 <= index <= 0xffffffff
+            or type(previous) is not int or previous <= 0
+            or type(expiry) is not int or expiry <= previous
+            or not isinstance(signature, str) or not re.fullmatch(r'[0-9a-f]{128}', signature)):
+        return jsonify({'error': 'Invalid renewal fields or compact ECDSA signature'}), 400
+    now = int(datetime.now().timestamp())
+    if not now < expiry <= now + MAX_RENEWAL_SECONDS:
+        return jsonify({'error': 'Expiry must be in the future and within 365 days'}), 400
+
+    _lock_listing_name(name)
+    listing = Listing.query.filter_by(name=name).order_by(
+        Listing.created_at.desc(), Listing.id.desc()).first()
+    if not listing or listing.status not in {'active', 'expired'}:
+        return jsonify({'error': 'An active or board-expired latest listing is required'}), 409
+    proof = listing.proof_json or {}
+    if (_listing_coin_ref(listing) != (tx_hash, index)
+            or _address_network(proof.get('paymentAddr')) != network):
+        return jsonify({'error': 'Renewal does not match the current listing lock/network'}), 409
+    actual = _expiry_timestamp(listing)
+    if actual not in (previous, expiry):
+        return jsonify({'error': 'Listing expiry changed; fetch the current proof and sign again',
+                        'expiresAt': actual}), 409
+    digest = renewal_digest(network, name, tx_hash, index, previous, expiry)
+    valid, message, status = verify_renewal_signature(digest, signature, proof.get('publicKey'))
+    if not valid:
+        return jsonify({'error': message}), status
+    # Renewal never extends on-chain ownership or restores a spent/expired name.
+    valid, result, status = _verify_listing_proof_on_chain(proof)
+    if not valid:
+        return jsonify({'error': result}), status
+    if actual == expiry:
+        return jsonify({'success': True, 'name': name, 'expiresAt': actual,
+                        'renewed': False, 'replayed': True, 'cid': listing.ipfs_cid}), 200
+    updated_proof = {**proof, 'expiresAt': expiry}
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=current_app.config['UPLOAD_FOLDER'],
+                                         suffix='.json', delete=False) as temporary:
+            temp_path = temporary.name
+            json.dump(updated_proof, temporary)
+        cid = pin_to_ipfs(temp_path)
+    except Exception:
+        return jsonify({'error': 'Could not store the renewed proof; existing listing is unchanged'}), 503
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+    # Pinning can take seconds. Recheck the current owner before committing.
+    valid, result, status = _verify_listing_proof_on_chain(proof)
+    if not valid:
+        return jsonify({'error': result}), status
+    listing.proof_json = updated_proof
+    listing.expires_at = datetime.utcfromtimestamp(expiry)
+    listing.ipfs_cid = cid
+    listing.status = 'active'
+    db.session.commit()
+    return jsonify({'success': True, 'name': name, 'expiresAt': expiry,
+                    'renewed': True, 'replayed': False, 'cid': cid}), 200
+
+
 @api_bp.route('/upload-proof', methods=['POST'])
 @limiter.limit(PROOF_UPLOAD_RATE_LIMIT)  # per IP; supports Bob's bulk-submit workflow.
 def upload_proof():
@@ -3037,6 +3125,7 @@ def upload_proof():
             or (expected_fee > 0 and (not fee_address or proof_data.get('feeAddr') != fee_address))):
         os.remove(temp_path)
         return jsonify({'error': 'Proof fee must match this market fee policy'}), 400
+    requested_expiry = proof_data.get('expiresAt')
     listing_fields = fixed_price_listing_fields(proof_data)
     if listing_fields['expires_at'] and listing_fields['expires_at'] < datetime.utcnow():
         os.remove(temp_path)
@@ -3054,6 +3143,16 @@ def upload_proof():
         .order_by(Listing.created_at.desc())
         .first()
     )
+    latest = Listing.query.filter_by(name=listing_fields['name']).order_by(
+        Listing.created_at.desc(), Listing.id.desc()).first()
+    latest_proof = (latest.proof_json or {}) if latest else {}
+    same_latest_lock = latest and all(latest_proof.get(key) == proof_data.get(key)
+                                     for key in ('lockingTxHash', 'lockingOutputIdx', 'publicKey'))
+    if same_latest_lock and (latest.status != 'active' or latest.is_expired()):
+        os.remove(temp_path)
+        return jsonify({'error': 'Use signed renewal for a board-expired listing; refresh terminal chain status first',
+                        'code': 'listing_renewal_or_refresh_required',
+                        **_expiry_upload_result(latest, requested_expiry)}), 409
     replacement_listing = None
     if existing_active and not existing_active.is_expired():
         existing_proof = existing_active.proof_json or {}
@@ -3079,7 +3178,8 @@ def upload_proof():
             os.remove(temp_path)
             return jsonify({'success': True, 'name': existing_active.name,
                             'cid': existing_active.ipfs_cid, 'replaced': False,
-                            'replayed': True}), 200
+                            'replayed': True,
+                            **_expiry_upload_result(existing_active, requested_expiry)}), 200
         # expiresAt and description are not signed by Shakedex. A copied valid
         # proof must not shorten the listing lifetime or replace seller text.
         listing_fields['expires_at'] = existing_active.expires_at
@@ -3137,4 +3237,5 @@ def upload_proof():
         "cid": cid,
         "replaced": bool(replacement_listing),
         "previousListingId": replacement_listing.id if replacement_listing else None,
+        **_expiry_upload_result(listing, requested_expiry),
     }), 201

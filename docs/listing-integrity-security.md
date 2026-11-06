@@ -1,7 +1,8 @@
 # Listing integrity API changes
 
-Status: patch under local validation; not deployed. Based on production commit
-`3d117361166c806e587752f56b44b9ab13abefc3`.
+Status: the original integrity fix deployed November 2, 2026 as `1558d48`.
+The follow-up renewal API is described in [listing-renewal.md](listing-renewal.md);
+its deployment status is tracked separately.
 
 ## Proof uploads
 
@@ -21,8 +22,9 @@ before deploying. It does not change fee settings or stored proofs.
 For the same live lock, replay is a no-op and price increases are rejected to
 prevent old higher-price proofs from undoing reductions. New lower-price signed
 proofs preserve the existing description, account association and expiresAt,
-which are not signed by this protocol. Raising a price or changing these fields
-requires a new lock until a separate signed metadata protocol is added.
+which are not signed by this protocol. Raising a price or editing seller text still requires a new lock. The renewal
+follow-up adds owner-signed expiry extensions without a new on-chain lock; see
+[the renewal protocol](listing-renewal.md).
 
 PostgreSQL transaction advisory locks serialize same-name writes. SQLite is
 used for isolated tests, not a production concurrency guarantee. Uploads are
