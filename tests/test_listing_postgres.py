@@ -14,11 +14,13 @@ from app import create_app
 from app.blueprints.api import _lock_listing_name
 from app.models import db, Listing
 from test_listing_security import fixture
+from test_listing_renewal import signed_renewal
+from app.blueprints.api import _expiry_timestamp
 
 
 @unittest.skipUnless(os.environ.get('TEST_POSTGRES_URL'), 'Disposable PostgreSQL URL not configured')
 class PostgreSQLListingLockTests(unittest.TestCase):
-    def test_concurrent_same_lock_upload_pins_once_and_keeps_one_active_row(self):
+    def test_concurrent_upload_and_renewal_serialize_and_pin_once(self):
         url = os.environ['TEST_POSTGRES_URL']
         # Never allow this destructive test to point to a real application DB.
         self.assertEqual(make_url(url).database, 'market_security_test')
@@ -75,3 +77,30 @@ class PostgreSQLListingLockTests(unittest.TestCase):
             with app.app_context():
                 self.assertEqual(Listing.query.filter_by(status='active').count(),1)
                 self.assertEqual(Listing.query.count(),1)
+
+            with app.app_context():
+                row = Listing.query.one()
+                renewal = signed_renewal(proof, previous=_expiry_timestamp(row))
+            pin_started.clear(); second_at_lock.clear(); release_pin.clear()
+            count = 0
+            pin_mock.reset_mock()
+            def renew():
+                with app.test_client() as client:
+                    response = client.post('/api/v2/listings/security-fixture/renew', json=renewal)
+                    return response.status_code, response.json
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(renew)
+                try:
+                    self.assertTrue(pin_started.wait(10))
+                    second = executor.submit(renew)
+                    self.assertTrue(second_at_lock.wait(10))
+                    self.assertFalse(second.done())
+                finally:
+                    release_pin.set()
+                results = [first.result(timeout=15), second.result(timeout=15)]
+            self.assertEqual([item[0] for item in results], [200, 200], results)
+            self.assertEqual(sorted(item[1]['renewed'] for item in results), [False, True])
+            self.assertEqual(pin_mock.call_count, 1)
+            with app.app_context():
+                self.assertEqual(Listing.query.count(), 1)
+                self.assertEqual(_expiry_timestamp(Listing.query.one()), renewal['expiresAt'])

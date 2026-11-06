@@ -1,0 +1,15 @@
+{
+  "description": "Interoperability test only: public test private key = 1; never use for real names",
+  "publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "request": {
+    "network": "main",
+    "name": "security-fixture",
+    "lockingTxHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "lockingOutputIdx": 0,
+    "previousExpiresAt": 1800000000,
+    "expiresAt": 1800086400,
+    "signature": "db74443f0985f316cf97786408a4c34d0ffb773d12588e7285ac6acd356bc43f1779e63a2e78e6b6fde676148c1da8305aec2b5a58a7af06c0eea8cd72b6ca3b"
+  },
+  "message": "LearnHNS Market listing renewal v1\nmain\nsecurity-fixture\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n0\n1800000000\n1800086400",
+  "sha256": "f8d3168f508116b7ff820e6c3942b34dbbadfbad239f28c4f47ff8a61722733c"
+}
