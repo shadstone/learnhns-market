@@ -54,6 +54,32 @@ class PendingReconciliationTests(unittest.TestCase):
         self.assertIn('proof', payload['nextAction'])
         self.assertNotIn('finalize', payload['nextAction'])
 
+    def test_oscar_batch_finalization_with_legacy_missing_output_indices(self):
+        # Public FINALIZE transaction in block 354192, independently matched to
+        # these three market pending records. The legacy records omit indices.
+        tx_hash = '75a06fe7dd4690bad26d8a228bd7b01de257969579387f1a79871f65fc2068ac'
+        transfers = [
+            ('d0', '5437a1a4f490651ef11d8c62cae3124aab5436dd00ab003187497d71a402c17f'),
+            ('u0', '82ac6cb2205f1042a45b81395b3a667f7241668cd6dbab2e75e23c3e221c82c1'),
+            ('xn--ip8h', 'be7e42811d3d07f00d116f4b451e7ae4f4aa2cf61c58651f24e79af60af39f77'),
+        ]
+        inputs = [{'prevout': {'hash': transfer, 'index': 0}} for _, transfer in transfers]
+        inputs.append({'prevout': {'hash': transfers[1][1], 'index': 1}})
+        self.chain['height'] = 354590
+        self.block.return_value = ({'height': 354192, 'txs': [{'hash': tx_hash, 'inputs': inputs}]}, None)
+        for index, (name, transfer_hash) in enumerate(transfers):
+            with self.subTest(name=name):
+                self.row.name = name
+                self.row.transfer_tx_hash = transfer_hash
+                self.row.transfer_output_idx = None
+                self.info['info'].update(owner={'hash': tx_hash, 'index': index}, transfer=0)
+                self.coin.update(hash=tx_hash, index=index, height=354192,
+                                 covenant={'type': 10, 'items': [hashlib.sha3_256(name.encode()).hexdigest()]})
+                payload = pending_status(self.row)
+                self.assertTrue(payload['verified'])
+                self.assertEqual(payload['status'], 'awaiting-proof')
+                self.assertIsNone(payload['blocksUntilFinalize'])
+
     def test_cancelled_or_later_owner_retires_pending_on_every_browse_surface(self):
         self.change_owner()
         self.block.return_value[0]['txs'][0]['inputs'][0]['prevout']['hash'] = 'c'*64
