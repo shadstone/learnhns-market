@@ -5,6 +5,8 @@ import requests
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 from app.models import db, ExpiringNameWatch, GlobalNameState, Listing, NameIndexerProgress, PendingListing
+from app.pending_status import PENDING_TERMINAL_STATUSES, status_reason
+from app.market_filters import filter_auctions
 from app.utils import (
     fixed_price_listing_fields,
     validate_shakedex_proof,
@@ -30,7 +32,6 @@ api_bp = Blueprint('api', __name__)
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 SHAKEDEX_TRANSFER_LOCKUP = 288
-PENDING_TERMINAL_STATUSES = {'active', 'cancelled', 'expired', 'failed'}
 PROOF_UPLOAD_RATE_LIMIT = "100 per hour"
 
 
@@ -78,213 +79,8 @@ def _bob_auction_from_listing(listing):
 
 
 def _pending_listing_status(pending):
-    if pending.is_expired():
-        return {
-            "status": "expired",
-            "pendingReason": "Pending listing expired",
-            "blocksUntilFinalize": None,
-            "chainHeight": None,
-            "transferHeight": None,
-        }
-
-    if pending.status in PENDING_TERMINAL_STATUSES:
-        return {
-            "status": pending.status,
-            "pendingReason": "Pending listing is no longer awaiting finalization",
-            "blocksUntilFinalize": None,
-            "chainHeight": None,
-            "transferHeight": None,
-        }
-
-    tx, tx_error = _fetch_hsd_tx(pending.transfer_tx_hash)
-    if tx_error:
-        status_code = tx_error[1]
-        if status_code == 404:
-            chain_payload, chain_status = get_hsd_status_payload()
-            indexers = {}
-            if chain_status == 200:
-                indexers = ((chain_payload.get('chain') or {}).get('indexers') or {})
-            if indexers.get('indexTX') is False:
-                return _pending_status_from_name_info(pending, chain_payload, chain_status)
-            return {
-                "status": "pending-submitted",
-                "pendingReason": "Waiting for transfer transaction to appear",
-                "blocksUntilFinalize": None,
-                "chainHeight": None,
-                "transferHeight": None,
-            }
-        return {
-            "status": pending.status or "pending-submitted",
-            "pendingReason": "Could not refresh chain status",
-            "blocksUntilFinalize": None,
-            "chainHeight": None,
-            "transferHeight": None,
-        }
-
-    tx_height = tx.get('height') if isinstance(tx, dict) else None
-    if not isinstance(tx_height, int) or tx_height < 0:
-        return {
-            "status": "transfer-unconfirmed",
-            "pendingReason": "Waiting for transfer confirmation",
-            "blocksUntilFinalize": None,
-            "chainHeight": None,
-            "transferHeight": tx_height,
-        }
-
-    chain_payload, chain_status = get_hsd_status_payload()
-    chain_height = chain_payload.get('height') if chain_status == 200 else None
-    if not isinstance(chain_height, int):
-        return {
-            "status": "transfer-lockup",
-            "pendingReason": "Transfer confirmed; waiting for chain status",
-            "blocksUntilFinalize": None,
-            "chainHeight": None,
-            "transferHeight": tx_height,
-        }
-
-    active_transfer = _pending_name_info_matches_transfer(pending)
-    if active_transfer is False:
-        return {
-            "status": "pending-submitted",
-            "pendingReason": "Pending record received; no active transfer lockup is visible for this pending transfer.",
-            "blocksUntilFinalize": None,
-            "chainHeight": chain_height,
-            "transferHeight": None,
-        }
-
-    blocks_since_transfer = max(chain_height - tx_height, 0)
-    blocks_until_finalize = max((SHAKEDEX_TRANSFER_LOCKUP + 1) - blocks_since_transfer, 0)
-    if blocks_until_finalize > 0:
-        return {
-            "status": "transfer-lockup",
-            "pendingReason": "Waiting for Shakedex lock finalization",
-            "blocksUntilFinalize": blocks_until_finalize,
-            "chainHeight": chain_height,
-            "transferHeight": tx_height,
-        }
-
-    return {
-        "status": "ready-to-finalize",
-        "pendingReason": "Ready for seller to finalize the Shakedex lock",
-        "blocksUntilFinalize": 0,
-        "chainHeight": chain_height,
-        "transferHeight": tx_height,
-    }
-
-
-def _pending_name_info_matches_transfer(pending):
-    name_info, name_error = _fetch_hsd_name_info(pending.name)
-    if name_error:
-        return None
-
-    info = name_info.get('info') if isinstance(name_info, dict) else None
-    if not isinstance(info, dict):
-        return None
-
-    owner = info.get('owner') if isinstance(info.get('owner'), dict) else {}
-    owner_hash = str(owner.get('hash') or '').lower()
-    if not owner_hash:
-        return None
-    if owner_hash != pending.transfer_tx_hash:
-        return False
-
-    if pending.transfer_output_idx is not None:
-        try:
-            if int(owner.get('index')) != int(pending.transfer_output_idx):
-                return False
-        except (TypeError, ValueError):
-            return None
-
-    return True
-
-
-def _pending_status_from_name_info(pending, chain_payload=None, chain_status=None):
-    name_info, name_error = _fetch_hsd_name_info(pending.name)
-    chain_height = chain_payload.get('height') if chain_status == 200 else None
-
-    if name_error:
-        return {
-            "status": "pending-submitted",
-            "pendingReason": "Pending record received; this channel is not transaction-indexed, and name-state lookup is not available yet.",
-            "blocksUntilFinalize": None,
-            "chainHeight": chain_height,
-            "transferHeight": None,
-            "nameState": None,
-        }
-
-    info = name_info.get('info') if isinstance(name_info, dict) else None
-    if not isinstance(info, dict):
-        return {
-            "status": "pending-submitted",
-            "pendingReason": "Pending record received; no active on-chain name state is visible yet.",
-            "blocksUntilFinalize": None,
-            "chainHeight": chain_height,
-            "transferHeight": None,
-            "nameState": None,
-        }
-
-    stats = info.get('stats') if isinstance(info.get('stats'), dict) else {}
-    transfer_height = info.get('transfer')
-    if not isinstance(transfer_height, int) or transfer_height <= 0:
-        return {
-            "status": "pending-submitted",
-            "pendingReason": "Pending record received; no active transfer lockup is visible for this name yet.",
-            "blocksUntilFinalize": None,
-            "chainHeight": chain_height,
-            "transferHeight": None,
-            "nameState": info.get('state'),
-        }
-
-    owner = info.get('owner') if isinstance(info.get('owner'), dict) else {}
-    owner_hash = str(owner.get('hash') or '').lower()
-    if owner_hash and owner_hash != pending.transfer_tx_hash:
-        return {
-            "status": "pending-submitted",
-            "pendingReason": "Pending record received; no active transfer lockup is visible for this pending transfer.",
-            "blocksUntilFinalize": None,
-            "chainHeight": chain_height,
-            "transferHeight": None,
-            "nameState": info.get('state'),
-        }
-
-    if pending.transfer_output_idx is not None:
-        try:
-            owner_index_matches = int(owner.get('index')) == int(pending.transfer_output_idx)
-        except (TypeError, ValueError):
-            owner_index_matches = False
-        if not owner_index_matches:
-            return {
-                "status": "pending-submitted",
-                "pendingReason": "Pending record received; no active transfer lockup is visible for this pending transfer.",
-                "blocksUntilFinalize": None,
-                "chainHeight": chain_height,
-                "transferHeight": None,
-                "nameState": info.get('state'),
-            }
-
-    blocks_until_finalize = stats.get('blocksUntilValidFinalize')
-    if not isinstance(blocks_until_finalize, int) and isinstance(chain_height, int):
-        blocks_since_transfer = max(chain_height - transfer_height, 0)
-        blocks_until_finalize = max(SHAKEDEX_TRANSFER_LOCKUP - blocks_since_transfer, 0)
-
-    if isinstance(blocks_until_finalize, int) and blocks_until_finalize <= 0:
-        return {
-            "status": "ready-to-finalize",
-            "pendingReason": "Transfer lockup is complete; seller can finalize the Shakedex lock and upload the proof.",
-            "blocksUntilFinalize": 0,
-            "chainHeight": chain_height,
-            "transferHeight": transfer_height,
-            "nameState": info.get('state'),
-        }
-
-    return {
-        "status": "transfer-lockup",
-        "pendingReason": "Transfer detected; waiting for Shakedex lockup before seller finalizes the proof.",
-        "blocksUntilFinalize": blocks_until_finalize,
-        "chainHeight": chain_height,
-        "transferHeight": transfer_height,
-        "nameState": info.get('state'),
-    }
+    from app.pending_status import pending_status
+    return pending_status(pending)
 
 
 def _name_transfer_status(name):
@@ -357,7 +153,7 @@ def _name_transfer_status(name):
 def _pending_listing_payload(pending, refresh=True):
     status_info = _pending_listing_status(pending) if refresh else {
         "status": pending.status,
-        "pendingReason": None,
+        "pendingReason": status_reason(pending.status),
         "blocksUntilFinalize": None,
         "chainHeight": None,
         "transferHeight": None,
@@ -393,6 +189,12 @@ def _pending_listing_payload(pending, refresh=True):
 
 
 def _pending_listing_action(status, blocks_until_finalize=None):
+    if status == 'awaiting-proof':
+        return {'required': True, 'label': 'Generate and submit the proof in Bob',
+                'detail': 'The listing transfer is finalized. Generate the sale proof and submit it to this channel in Bob.'}
+    if status == 'superseded':
+        return {'required': False, 'label': 'Check the current ownership in Bob',
+                'detail': 'This old transfer is no longer current. If you finalized a listing lock, submit its sale proof in Bob. If you cancelled, this pending record needs no further action.'}
     if status == 'ready-to-finalize':
         return {
             'required': True,
@@ -1745,6 +1547,10 @@ def auctions():
     else:
         # Buyable inventory leads the backwards-compatible combined feed.
         all_rows = [*active_rows, *pending_rows]
+    try:
+        all_rows = filter_auctions(all_rows, request.args)
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 400
     total = len(all_rows)
     start = (page - 1) * per_page
     end = start + per_page
@@ -1753,6 +1559,7 @@ def auctions():
         "total": total,
         "auctions": all_rows[start:end],
         "availability": availability,
+        "filterVersion": 1,
     })
 
 
@@ -2182,6 +1989,24 @@ def create_pending_listing():
 
     _lock_listing_name(name)
     pending = PendingListing.query.filter_by(name=name, network=network).first()
+    if pending is not None and pending.status == 'superseded' and pending.transfer_tx_hash != transfer_tx_hash:
+        # The replacement above was verified against the synced current chain.
+        # Retiring an old transfer must not block a seller's later relisting.
+        pending.transfer_tx_hash = transfer_tx_hash
+        pending.transfer_output_idx = transfer_output_idx
+        pending.status = 'pending-submitted'
+        pending.created_at = datetime.utcnow()
+        pending.expires_at = None
+        pending.expected_price = None
+        pending.seller_note = None
+        pending.lock_script_addr = None
+        pending.listing_mode = 'fixed-price'
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify({'error': 'Pending transfer already exists; retry'}), 409
+        return jsonify({'success': True, 'pending': _pending_listing_payload(pending, refresh=False)}), 201
     if pending is not None:
         if (pending.transfer_tx_hash != transfer_tx_hash
                 or pending.transfer_output_idx not in (None, transfer_output_idx)):

@@ -15,6 +15,7 @@ from app.blueprints.api import _fetch_hsd_name_info
 from app.blueprints.api import _name_transfer_status
 from app.blueprints.api import _mark_listing_sold_if_spent
 from app.blueprints.api import _pending_listing_payload
+from app.pending_status import PENDING_TERMINAL_STATUSES
 from app.blueprints.api import _refreshable_listing_for_spend
 from app.blueprints.api import _resolve_sale_pending_listing
 from app.blueprints.api import _validate_hex_hash
@@ -32,7 +33,7 @@ def index():
     active_names = {listing.name for listing in listings}
     pending_listings = [
         pending for pending in PendingListing.query.order_by(PendingListing.created_at.desc()).all()
-        if pending.status not in {'active', 'cancelled', 'expired', 'failed'}
+        if pending.status not in PENDING_TERMINAL_STATUSES
         and not pending.is_expired()
         and pending.name not in active_names
     ]
@@ -251,7 +252,7 @@ def pending():
     }
     pending_listings = [
         pending for pending in PendingListing.query.order_by(PendingListing.created_at.desc()).all()
-        if pending.status not in {'active', 'cancelled', 'expired', 'failed'}
+        if pending.status not in PENDING_TERMINAL_STATUSES
         and not pending.is_expired()
         and pending.name not in active_names
     ]
@@ -267,7 +268,7 @@ def stats():
     active_names = {listing.name for listing in listings}
     pending_listings = [
         pending for pending in PendingListing.query.order_by(PendingListing.created_at.desc()).all()
-        if pending.status not in {'active', 'cancelled', 'expired', 'failed'}
+        if pending.status not in PENDING_TERMINAL_STATUSES
         and not pending.is_expired()
         and pending.name not in active_names
     ]
@@ -400,13 +401,17 @@ def listing_detail(name):
             .first()
         )
         if pending and pending.status not in {'active', 'cancelled', 'expired', 'failed'} and not pending.is_expired():
-            return render_template(
-                'pending.html',
-                pending=_pending_listing_payload(pending),
-                listing_history=listing_history,
-                watcher_count=watcher_count_for_name(normalized_name),
-                hsd_readiness=_hsd_readiness(),
-            )
+            payload = _pending_listing_payload(pending)
+            # Prefer the recorded sale/cancellation history over a retired
+            # pending placeholder when this name also has a real listing.
+            if payload['status'] != 'superseded' or not listing_history:
+                return render_template(
+                    'pending_retired.html' if payload['status'] == 'superseded' else 'pending.html',
+                    pending=payload,
+                    listing_history=listing_history,
+                    watcher_count=watcher_count_for_name(normalized_name),
+                    hsd_readiness=_hsd_readiness(),
+                )
 
         listing = (
             Listing.query

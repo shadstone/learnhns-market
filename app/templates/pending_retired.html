@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block title %}{{ display_name(pending.name) }} | Listing update | LearnHNS Market{% endblock %}
+{% block content %}
+<div class="max-w-3xl mx-auto bg-white p-8 rounded-lg shadow-sm border border-gray-100">
+    <h1 class="text-4xl font-bold mb-6">{{ display_name(pending.name) }}</h1>
+    <h2 class="text-xl font-semibold mb-3">Previous pending record retired</h2>
+    <p class="mb-4">{{ pending.pendingReason }}</p>
+    <p class="mb-6">{{ pending.nextActionDetail }}</p>
+    <a href="{{ url_for('main.index') }}" class="text-indigo-700 underline">Back to marketplace</a>
+</div>
+{% endblock %}
