@@ -234,6 +234,22 @@ class ListingSecurityTests(unittest.TestCase):
         self.assertEqual(row.expected_price,222)
         self.assertEqual(row.created_at,created)
 
+    def test_retired_pending_can_be_replaced_only_by_verified_new_transfer(self):
+        self.pending_chain()
+        self.assertEqual(self.pending().status_code, 201)
+        row = PendingListing.query.one()
+        row.status = 'superseded'; db.session.commit()
+        # An arbitrary caller-supplied hash still cannot replace the record.
+        self.assertEqual(self.pending(transferTxHash='b'*64).status_code, 409)
+        self.owner['hash'] = 'b'*64
+        self.coin['hash'] = 'b'*64
+        response = self.pending(transferTxHash='b'*64, expectedPrice=999)
+        self.assertEqual(response.status_code, 201, response.json)
+        self.assertEqual(PendingListing.query.count(), 1)
+        self.assertEqual(row.transfer_tx_hash, 'b'*64)
+        self.assertEqual(row.status, 'pending-submitted')
+        self.assertIsNone(row.expected_price)
+
     def test_pending_different_existing_transfer_is_not_overwritten(self):
         self.pending_chain()
         row=PendingListing(name=self.proof['name'],network='main',transfer_tx_hash='b'*64,transfer_output_idx=0)

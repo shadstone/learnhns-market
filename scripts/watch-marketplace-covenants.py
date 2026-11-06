@@ -9,6 +9,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app import create_app
+from app.pending_status import reconcile_pending_listings
 from app.marketplace_indexer import index_listing_hashes, mark_progress_failed, scan_market_blocks
 
 
@@ -52,6 +53,7 @@ def main():
                         ],
                     },
                     "blocks": block_result,
+                    "pending": reconcile_pending_listings(),
                 }, indent=2, sort_keys=True), flush=True)
             except Exception as exc:
                 cycle_error = exc
