@@ -51,3 +51,13 @@ jobs:
           -e TEST_POSTGRES_URL=postgresql://postgres:isolated-ci-only@127.0.0.1:5432/market_security_test
           learnhns-market-ci
           sh -lc 'flask db upgrade && python -m unittest discover -s tests -p test_listing_postgres.py -v'
+
+      - name: Build and smoke-test the local regtest sandbox
+        run: |
+          docker compose -p market-regtest-ci -f compose.regtest.yaml config --quiet
+          docker compose -p market-regtest-ci -f compose.regtest.yaml up --build -d
+          python3 scripts/check-regtest-sandbox.py
+
+      - name: Stop local regtest sandbox
+        if: always()
+        run: docker compose -p market-regtest-ci -f compose.regtest.yaml down --volumes

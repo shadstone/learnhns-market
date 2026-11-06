@@ -9,3 +9,5 @@ venv/
 env/
 temp-specs/
 node_modules/
+
+.env.regtest

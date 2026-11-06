@@ -1,0 +1,36 @@
+# Local-only developer sandbox. All exposed ports bind to loopback.
+services:
+  hsd-regtest:
+    build:
+      context: .
+      dockerfile: dev/regtest/Dockerfile
+    environment:
+      HSD_API_KEY: local-regtest-only
+      HSD_WALLET_API_KEY: local-regtest-only
+    ports:
+      - "127.0.0.1:14037:14037"
+      - "127.0.0.1:14039:14039"
+    volumes:
+      - regtest-chain:/data
+  market:
+    build: .
+    depends_on:
+      - hsd-regtest
+    environment:
+      APP_ENV: development
+      ALLOWED_PROOF_NETWORKS: regtest
+      DATABASE_URL: sqlite:////data/market.db
+      SECRET_KEY: local-regtest-only
+      HSD_HTTP_URL: http://hsd-regtest:14037
+      HSD_API_STYLE: raw
+      HSD_API_KEY: local-regtest-only
+      PINATA_API_KEY: ${PINATA_API_KEY:-}
+      PINATA_SECRET_KEY: ${PINATA_SECRET_KEY:-}
+      GFAVIP_WEBHOOK_URL: ""
+    ports:
+      - "127.0.0.1:18000:8000"
+    volumes:
+      - regtest-market:/data
+volumes:
+  regtest-chain:
+  regtest-market:
