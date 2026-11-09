@@ -1,195 +1,176 @@
 {% extends "base.html" %}
-
+{% block title %}Wallet Integration Guide | LearnHNS Market{% endblock %}
+{% block meta_description %}Integrate a Handshake wallet with LearnHNS Market: Shakedex v2 proofs, public APIs, wallet handoffs, purchase recovery, and finalization testing.{% endblock %}
 {% block content %}
 <div class="max-w-4xl mx-auto space-y-8">
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <p class="text-sm uppercase tracking-wide text-indigo-600 font-semibold mb-2">Documentation</p>
-        <h1 class="text-4xl font-bold text-gray-900">LearnHNS Market Docs</h1>
-        <p class="text-gray-600 mt-4 text-lg">
-            LearnHNS Market is rebuilding the Shakedex-style Handshake marketplace flow for Bob Wallet.
-            The current focus is fixed-price listings, Bob-compatible marketplace APIs, and SPV-friendly buying.
-        </p>
-    </section>
-
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">Current Status</h2>
-        <div class="grid gap-4 sm:grid-cols-2">
-            <div class="rounded-md border border-green-200 bg-green-50 p-4">
-                <h3 class="font-semibold text-green-900">Working</h3>
-                <ul class="mt-2 space-y-2 text-green-800">
-                    <li>Fixed-price Shakedex proof upload</li>
-                    <li>Public listing pages</li>
-                    <li>Bob-compatible auction API</li>
-                    <li>Hosted HSD status endpoint</li>
-                    <li>Bob SPV purchase fallback code</li>
-                </ul>
-            </div>
-            <div class="rounded-md border border-amber-200 bg-amber-50 p-4">
-                <h3 class="font-semibold text-amber-900">In Progress</h3>
-                <ul class="mt-2 space-y-2 text-amber-800">
-                    <li>Railway HSD mainnet sync</li>
-                    <li>End-to-end mainnet Bob SPV purchase verification</li>
-                    <li>Native Bob seller flow polish</li>
-                    <li>Marketplace fee configuration</li>
-                </ul>
-            </div>
+    <section id="wallet-integration" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <p class="text-sm uppercase tracking-wide text-indigo-600 font-semibold mb-2">Developer documentation · Updated November 9, 2026</p>
+        <h1 class="text-3xl sm:text-4xl font-bold text-gray-900">Wallet integration guide</h1>
+        <p class="text-gray-700 mt-4 text-lg">Connect a Handshake wallet to LearnHNS Market’s fixed-price Shakedex listings. The market publishes offers and checks chain state; the buyer’s wallet validates, funds, signs and broadcasts the purchase, then completes finalization.</p>
+        <p class="mt-4 text-gray-700">Start with buying an existing listing. Seller tools, listing renewal and in-wallet browsing can be added separately. Market accounts are optional for this public buying flow; signing keys and recovery phrases stay in the wallet.</p>
+        <div class="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-amber-900">
+            <p class="font-semibold">For the Namebase team and other wallet developers</p>
+            <p class="mt-2">Namebase Wallet compatibility is not yet verified by LearnHNS. A wallet download link, ordinary HNS payments, Handshake auction support or ordinary name transfers do not establish Shakedex buying support. A “Buy with” option requires an agreed handoff and a tested purchase through finalization.</p>
         </div>
-        <p class="mt-5 text-gray-700">
-            Check live infrastructure progress on the <a href="{{ url_for('main.status') }}" class="text-indigo-600 hover:underline font-medium">status page</a>.
-        </p>
+        <nav aria-label="Integration guide contents" class="mt-6 flex flex-wrap gap-x-5 gap-y-3 text-sm font-semibold text-indigo-700">
+            <a class="underline" href="#quick-start">Quick start</a>
+            <a class="underline" href="#proof-format">Proof format</a>
+            <a class="underline" href="#purchase-lifecycle">Purchase lifecycle</a>
+            <a class="underline" href="#api-reference">API reference</a>
+            <a class="underline" href="#wallet-handoff">Wallet handoff</a>
+            <a class="underline" href="#testing">Testing</a>
+            <a class="underline" href="#partner-checklist">Partner checklist</a>
+        </nav>
     </section>
 
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">For Buyers</h2>
-        <ol class="list-decimal pl-6 space-y-3 text-gray-700">
-            <li>Browse listings on LearnHNS Market or inside Bob Wallet's Exchange marketplace.</li>
-            <li>Open a listing to inspect the name, price, seller address, and proof JSON.</li>
-            <li>Use Bob LearnHNS to buy from LearnHNS Market.</li>
-            <li>If Bob is in SPV mode, Bob asks LearnHNS Market for the listing coin data it cannot get locally.</li>
-            <li>Buying should wait until the hosted HSD node is fully synced.</li>
+    <section id="quick-start" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">1. Discover a listing</h2>
+        <p class="mt-4 text-gray-700">Production base URL: <code>https://market.learnhns.com</code>. Production is Handshake mainnet. The following requests only read data; they do not connect a wallet or buy anything.</p>
+        <pre class="mt-4 overflow-x-auto rounded bg-gray-100 p-4 text-sm"><code>curl --fail --silent --show-error \
+  'https://market.learnhns.com/api/v2/auctions?availability=available&amp;page=1&amp;per_page=20'
+
+curl --fail --silent --show-error \
+  'https://market.learnhns.com/api/v2/hsd/status'</code></pre>
+        <ol class="mt-4 list-decimal pl-6 space-y-3 text-gray-700">
+            <li>Read the <code>auctions</code> array. Pagination is one-based, <code>per_page</code> is capped at 100, and <code>total</code> is the matching count.</li>
+            <li>Use <code>availability=available</code> for buying. The default <code>all</code> feed also contains pending announcements with empty proof entries; those cannot be purchased.</li>
+            <li>Take the exact canonical <code>name</code> from the feed and URL-encode it as one path segment. Fetch <code>/listing/&lt;name&gt;/proof.json</code> and <code>/api/v2/listings/&lt;name&gt;/coin</code>.</li>
+            <li>Recheck availability and chain state immediately before signing. A feed entry is a snapshot, not a reservation.</li>
+        </ol>
+        <p class="mt-4 text-gray-700">Use lowercase ASCII names, including the <code>xn--</code> form for internationalized names, as identifiers. A decoded name may be displayed alongside the canonical identifier. Do not sign a different name produced by display normalization.</p>
+        <p class="mt-4 text-gray-700">Check current node readiness on the <a class="text-indigo-700 underline" href="{{ url_for('main.status') }}">status page</a>. Market-assisted clients must check the reported network, reachability and sync state and handle unavailable data. A wallet can use its own validated full node instead.</p>
+    </section>
+
+    <section id="proof-format" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">2. Parse and verify the proof</h2>
+        <p class="mt-4 text-gray-700">Market accepts version 2 fixed-price proofs with exactly one entry in <code>data</code>. This example shows the shape only: its placeholders are deliberately not valid cryptographic values and cannot be signed, uploaded or purchased.</p>
+        <pre class="mt-4 overflow-x-auto rounded bg-gray-100 p-4 text-sm"><code>{
+  "version": 2,
+  "name": "example",
+  "lockingTxHash": "&lt;64 hexadecimal characters&gt;",
+  "lockingOutputIdx": 0,
+  "publicKey": "&lt;33-byte compressed public key in hex&gt;",
+  "paymentAddr": "&lt;seller mainnet HNS address&gt;",
+  "feeAddr": null,
+  "expiresAt": 1825718400,
+  "data": [{
+    "price": 42000000,
+    "fee": 0,
+    "lockTime": 1794182400,
+    "signature": "&lt;65-byte Shakedex signature in hex&gt;"
+  }]
+}</code></pre>
+        <dl class="mt-5 space-y-4 text-gray-700">
+            <div><dt class="font-semibold text-gray-900">Amounts</dt><dd><code>price</code> is the seller payment and <code>fee</code> is the additional marketplace payment, both integer base units: 1 HNS = 1,000,000 units. The example pays the seller 42 HNS. Show both amounts and the wallet’s estimated network fee before approval. Keep calculations in integers; preserve the name coin’s value separately.</dd></div>
+            <div><dt class="font-semibold text-gray-900">Lock and signature</dt><dd><code>lockingTxHash</code> and <code>lockingOutputIdx</code> identify the name’s locked coin. Verify that it is unspent, is the current owner coin for this name, and matches the Shakedex script derived from <code>publicKey</code>. Verify the seller signature against the actual coin and transaction outputs. Shakedex uses Handshake’s <code>SINGLEREVERSE | ANYONECANPAY</code> signature mode; generic payment signing is insufficient.</dd></div>
+            <div><dt class="font-semibold text-gray-900">Time and expiry</dt><dd><code>data[0].lockTime</code> is the transaction lock time, not the listing expiry. Evaluate spend eligibility using chain consensus rules, including median time past for timestamp lock times. Optional top-level <code>expiresAt</code> in proof JSON is Unix seconds and controls market visibility. It does not cryptographically revoke an offer; an on-chain spend/cancellation is needed to invalidate the lock.</dd></div>
+            <div><dt class="font-semibold text-gray-900">Feed versus proof JSON</dt><dd>The auction feed supplies both <code>data</code> and the Bob-compatible <code>bids</code> alias, plus display metadata. Its <code>expiresAt</code> is an ISO date string (UTC, sometimes without a timezone suffix) or null; proof JSON uses integer Unix seconds. Fetch the dedicated proof endpoint rather than treating the whole feed row as an uploadable proof.</dd></div>
+            <div><dt class="font-semibold text-gray-900">Fees and network</dt><dd><code>/api/v2/fee_info</code> returns policy in basis points (100 = 1%) and <code>address</code>/<code>addr</code> aliases. An existing offer’s payment terms come from its proof; do not rewrite signed amounts or append today’s rate again. Verify addresses against the intended network, require a valid fee address for a nonzero fee, and confirm the node’s network. Proofs may omit an explicit network field.</dd></div>
+        </dl>
+        <p class="mt-5 text-gray-700">Treat downloaded proofs and chain-helper responses as untrusted inputs. Market checks do not replace wallet-side verification. Persist the original proof and a local fingerprint so a changed offer requires a fresh review.</p>
+    </section>
+
+    <section id="purchase-lifecycle" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">3. Complete the purchase lifecycle</h2>
+        <ol class="mt-5 list-decimal pl-6 space-y-4 text-gray-700">
+            <li><strong>Review.</strong> Validate the proof and current name state. Show the exact name, seller payment, marketplace fee, estimated network fee, network and buyer’s name-receive destination. Obtain approval inside the wallet.</li>
+            <li><strong>Fill.</strong> Construct the Shakedex fulfillment transaction that spends the locked name coin, pays the seller and any proof fee, and starts a <code>TRANSFER</code> to the buyer. Preserve script, covenant, input and output-order requirements. Fund and sign locally, then broadcast through the wallet’s node/provider. The Market endpoints below do not sign or broadcast it.</li>
+            <li><strong>Save and track.</strong> Persist the fulfillment transaction hash, proof, locking public key, recipient, network and any wallet-specific recovery data before reporting success. Keep enough durable state to resume after closing or restarting the app.</li>
+            <li><strong>Notify Market.</strong> After broadcast, the wallet or web adapter can POST the hash to <code>/api/v2/listings/&lt;name&gt;/refresh-status</code>. Market verifies canonical chain evidence; an unconfirmed or not-yet-visible transaction may not be accepted immediately. A failed status update must not cause another purchase.</li>
+            <li><strong>Wait and finalize.</strong> After the transfer confirms, wait for the mainnet 288-block transfer lockup (roughly two days; actual time varies). Construct and broadcast the Shakedex script-spend <code>FINALIZE</code>. Test this specifically: a wallet’s ordinary transfer finalizer may not handle a Shakedex script.</li>
+            <li><strong>Verify delivery.</strong> Confirm the finalization transaction and verify that the current name owner is the buyer’s intended wallet destination. Handle reorgs by rechecking canonical transactions and maturity before advancing state.</li>
         </ol>
         <div class="mt-5 rounded-md border border-indigo-200 bg-indigo-50 p-4 text-indigo-900">
-            <p class="font-semibold">Bob Wallet compatibility</p>
-            <p class="mt-1 text-sm">
-                The buy flow works with Bob LearnHNS.
-                <a href="https://bobwallet.org/download/bob-learnhns/" target="_blank" rel="noopener noreferrer" class="font-semibold underline hover:text-indigo-700">Download Bob LearnHNS</a>
-                before opening market buy links.
-            </p>
+            <p><strong>“Sold” is not “finalized.”</strong> Market can record a verified purchase while the name is still in transfer lockup. The transfer-status response’s <code>finalized</code> label means no active lockup is visible; it does not alone prove delivery to this buyer. Check the owner and the buyer’s transaction history.</p>
         </div>
-        <div class="mt-5 rounded-md border border-red-200 bg-red-50 p-4 text-red-800">
-            Test/regtest proof JSON should never be used with production Bob Wallet.
-        </div>
+        <p class="mt-4 text-gray-700">Light clients need a defined chain-data trust model. The listing coin helper covers the seller’s locked coin; the wallet must also obtain its own spendable coins, name state, transaction data, finalization inputs and broadcast access. Never expose private node credentials to the website.</p>
     </section>
 
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">For Sellers</h2>
-        <ol class="list-decimal pl-6 space-y-3 text-gray-700">
-            <li>Create a Shakedex proof for a name you own.</li>
-            <li>Upload the proof JSON on the <a href="{{ url_for('main.upload') }}" class="text-indigo-600 hover:underline font-medium">upload page</a>.</li>
-            <li>The market validates the proof and creates a public listing.</li>
-            <li>Bob Wallet can read that listing through the Bob-compatible marketplace API.</li>
-        </ol>
-        <p class="mt-5 text-gray-700">
-            Native seller tools inside Bob Wallet are planned so sellers do not need terminal commands.
-        </p>
-    </section>
-
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">Temporary Seller CLI Flow</h2>
-        <p class="text-gray-700">
-            This is the current developer test path for a low-value mainnet name. It is intentionally being moved into Bob Wallet so normal sellers do not need to run terminal commands.
-        </p>
-        <div class="mt-5 rounded-md border border-red-200 bg-red-50 p-4 text-red-800">
-            Use only a low-value name you are willing to sell. A valid proof is a real sell offer.
+    <section id="api-reference" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">4. Public API reference</h2>
+        <p class="mt-4 text-gray-700">These routes use the Market base URL. Public reads and the chain-verified status notification below require no Market account or API key. Node/wallet RPC credentials are separate and stay private. Replace and URL-encode path placeholders.</p>
+        <div class="mt-5 overflow-x-auto">
+            <table class="w-full text-left text-sm">
+                <caption class="sr-only">Wallet integration endpoints and response fields</caption>
+                <thead class="bg-gray-100"><tr><th scope="col" class="p-3">Request</th><th scope="col" class="p-3">Purpose / response</th></tr></thead>
+                <tbody class="text-gray-700">
+                    <tr class="border-b"><td class="p-3"><code>GET /api/v2/auctions?availability=available&amp;page=1&amp;per_page=20</code></td><td class="p-3"><code>auctions</code>, <code>total</code>, <code>availability</code>. Select buyable inventory; revalidate before signing.</td></tr>
+                    <tr class="border-b"><td class="p-3"><code>GET /listing/&lt;name&gt;/proof.json</code></td><td class="p-3">Version 2 proof object. HTTP 404 when no available listing is found.</td></tr>
+                    <tr class="border-b"><td class="p-3"><code>GET /api/v2/listings/&lt;name&gt;/coin</code></td><td class="p-3"><code>name</code>, <code>lockingTxHash</code>, <code>lockingOutputIdx</code>, <code>coin</code> (hsd JSON).</td></tr>
+                    <tr class="border-b"><td class="p-3"><code>GET /api/v2/fee_info</code></td><td class="p-3"><code>rate</code> in basis points, <code>address</code>, <code>addr</code>. Policy for creating offers; existing proof amounts remain authoritative.</td></tr>
+                    <tr class="border-b"><td class="p-3"><code>GET /api/v2/hsd/status</code></td><td class="p-3"><code>reachable</code>, <code>network</code>, <code>height</code>, <code>progress</code> and node metadata.</td></tr>
+                    <tr class="border-b"><td class="p-3"><code>GET /api/v2/names/&lt;name&gt;/status</code></td><td class="p-3"><code>found</code>, <code>nameInfo</code>. Check current owner, name state and covenant context.</td></tr>
+                    <tr class="border-b"><td class="p-3"><code>GET /api/v2/tx/&lt;txHash&gt;/status</code></td><td class="p-3"><code>confirmed</code>, <code>height</code>, <code>confirmations</code>, <code>tx</code>. Lookup can fail when the backing node lacks transaction history; use the wallet’s provider as needed.</td></tr>
+                    <tr class="border-b"><td class="p-3"><code>POST /api/v2/listings/&lt;name&gt;/refresh-status</code></td><td class="p-3">JSON body <code>{"saleTxHash":"&lt;fulfillment transaction hash&gt;"}</code>. On success inspect <code>status</code>, <code>sold</code> and <code>saleTxHash</code>; HTTP 200 alone does not mean sold.</td></tr>
+                    <tr><td class="p-3"><code>GET /api/v2/names/&lt;name&gt;/transfer-status</code></td><td class="p-3"><code>available</code>, <code>status</code>, <code>blocksUntilFinalize</code>, <code>ownerTxHash</code>, <code>ownerOutputIndex</code>. Check payload availability even when HTTP is 200.</td></tr>
+                </tbody>
+            </table>
         </div>
-        <ol class="mt-5 list-decimal pl-6 space-y-4 text-gray-700">
-            <li>
-                Confirm Shakedex can load hsd:
-                <pre class="mt-2 overflow-x-auto rounded bg-gray-100 p-3 text-sm text-gray-800">cd /Users/michaelmichelini/Documents/GitHub/shakedex
-node -e "const {NodeClient, WalletClient} = require('hsd/lib/client'); console.log('hsd client OK')"</pre>
-            </li>
-            <li>
-                Transfer the name into the Shakedex lock. Replace the wallet id, API key, and name:
-                <pre class="mt-2 overflow-x-auto rounded bg-gray-100 p-3 text-sm text-gray-800">node src/cli/main.js \
-  --network main \
-  --prefix ~/.shakedex-learnhns-mainnet-test \
-  --wallet-id YOUR_BOB_WALLET_ID \
-  --api-key YOUR_BOB_WALLET_API_KEY \
-  transfer-lock YOURNAME</pre>
-            </li>
-            <li>
-                Back up the entire Shakedex test folder after the transfer starts:
-                <pre class="mt-2 overflow-x-auto rounded bg-gray-100 p-3 text-sm text-gray-800">~/.shakedex-learnhns-mainnet-test</pre>
-            </li>
-            <li>
-                After the Handshake transfer lockup completes, finalize the lock:
-                <pre class="mt-2 overflow-x-auto rounded bg-gray-100 p-3 text-sm text-gray-800">node src/cli/main.js \
-  --network main \
-  --prefix ~/.shakedex-learnhns-mainnet-test \
-  --wallet-id YOUR_BOB_WALLET_ID \
-  --api-key YOUR_BOB_WALLET_API_KEY \
-  finalize-lock YOURNAME</pre>
-            </li>
-            <li>
-                After the finalize transaction confirms, create the fixed-price proof:
-                <pre class="mt-2 overflow-x-auto rounded bg-gray-100 p-3 text-sm text-gray-800">node src/cli/main.js \
-  --network main \
-  --prefix ~/.shakedex-learnhns-mainnet-test \
-  --wallet-id YOUR_BOB_WALLET_ID \
-  --api-key YOUR_BOB_WALLET_API_KEY \
-  create-fixed YOURNAME 42 \
-  --out ~/Desktop/YOURNAME-learnhns-mainnet-proof.json</pre>
-                <p class="mt-2 text-sm text-gray-600">
-                    Use Shakedex commit <code class="rounded bg-gray-100 px-1">2c4fa04</code> or newer. Fixed-price proofs should be immediately buyable: the bid <code class="rounded bg-gray-100 px-1">lockTime</code> is current chain time, while listing visibility is stored separately as <code class="rounded bg-gray-100 px-1">expiresAt</code>.
-                </p>
-            </li>
-        </ol>
-        <p class="mt-5 text-gray-700">
-            The first live test used lowercase Bob wallet id <code class="rounded bg-gray-100 px-1">flamingo26</code>; Bob's displayed wallet label may be uppercase while the internal wallet id is lowercase.
-        </p>
+        <p class="mt-5 text-gray-700"><strong>Error handling:</strong> handle 400 (bad input), 404 (listing/data unavailable), 409 (state conflict or evidence not ready), 429 (rate limit), and 5xx (helper/verification failure). Some errors are JSON with <code>error</code>; do not assume every error body is JSON. Retain the transaction hash and retry status checks with bounded backoff. The refresh route is limited to 100 requests per hour per client IP; avoid tight polling and respect rate-limit responses.</p>
+        <p class="mt-4 text-gray-700">A missing coin or failed lookup is not proof of a sale. Treat uncertainty as pending verification and check canonical chain evidence. The refresh route also supports GET for legacy consumers, but it can update Market state: use POST deliberately and do not use it as a read-only health probe.</p>
     </section>
 
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">Bob Wallet And SPV</h2>
-        <p class="text-gray-700">
-            New Bob Wallet installs are moving toward SPV by default. SPV keeps normal wallet usage lightweight,
-            but it does not keep the full coin database needed by Shakedex purchases.
-        </p>
-        <div class="mt-5 rounded-md border border-gray-200 p-4 bg-gray-50">
-            <p class="font-semibold text-gray-900 mb-2">LearnHNS SPV buying flow</p>
-            <pre class="overflow-x-auto text-sm text-gray-800">Bob Wallet SPV -> LearnHNS Market -> hosted full HSD node -> listing coin data</pre>
-        </div>
-        <p class="mt-5 text-gray-700">
-            Bob still uses the buyer's own wallet to fund and authorize the purchase. LearnHNS Market does not need the buyer's seed phrase or private keys.
-        </p>
+    <section id="wallet-handoff" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">5. Agree on the wallet handoff</h2>
+        <p class="mt-4 text-gray-700">There is no universal Namebase or WalletConnect interface assumed by Market. A wallet team must document its supported mechanism, versions and platforms. These existing adapters are references, not APIs that another wallet automatically implements.</p>
+        <h3 class="mt-5 text-lg font-semibold">Bob LearnHNS desktop</h3>
+        <p class="mt-2 text-gray-700">The existing website opens this registered app scheme. Both query values are URL-encoded; <code>presign</code> contains the compact proof JSON.</p>
+        <pre class="mt-3 overflow-x-auto rounded bg-gray-100 p-4 text-sm"><code>bob-learnhns://x/fulfillauction?name=&lt;encoded-name&gt;&amp;presign=&lt;encoded-proof-json&gt;</code></pre>
+        <h3 class="mt-5 text-lg font-semibold">LearnHNS Wallet browser extension</h3>
+        <p class="mt-2 text-gray-700">The current adapter checks the injected provider and capability before requesting a fill. This is the extension’s interface; it is not a Namebase API.</p>
+        <pre class="mt-3 overflow-x-auto rounded bg-gray-100 p-4 text-sm"><code>// Existing LearnHNS Wallet interface; requires an installed compatible build.
+const wallet = await window.shake.connect();
+const capabilities = await wallet.getCapabilities();
+// Require capabilities.shakedexFill and wallet.fillShakedexAuction.
+// Only after the user's buy action and wallet review:
+const result = await wallet.fillShakedexAuction(proof);
+// result.fulfillmentTxHash identifies the broadcast purchase.</code></pre>
+        <h3 class="mt-5 text-lg font-semibold">A new wallet, including Namebase</h3>
+        <p class="mt-2 text-gray-700">Choose proof-file import, a documented desktop/mobile app link, or a browser provider. For an app link, specify whether it carries the proof or an HTTPS proof URL, payload limits, network binding, and how unsupported versions are handled. A URL-importing wallet must restrict allowed origins/redirects and request size, and verify the fetched proof locally.</p>
+        <p class="mt-3 text-gray-700">Agree on an optional transaction-hash return or callback; never treat a callback as chain evidence. Restrict return URLs and correlate responses with the intended listing. A missing app, rejected request, closed wallet or failed callback must leave a recoverable state. Opening the wallet must never silently approve a purchase.</p>
+        <p class="mt-3 text-gray-700">A link to <a class="text-indigo-700 underline" href="https://namebase.io/wallet">namebase.io/wallet</a> is a download/information link. It does not pass a listing into the app or prove purchase support.</p>
     </section>
 
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">API Endpoints</h2>
-        <div class="space-y-4">
-            <div>
-                <h3 class="font-semibold text-gray-900">Bob marketplace listings</h3>
-                <code class="block mt-1 rounded bg-gray-100 p-3 text-sm text-gray-800">GET /api/v2/auctions?availability=available|pending|all&amp;page=1&amp;per_page=20</code>
-                <p class="mt-2 text-sm text-gray-600">The combined feed remains available for older consumers and lists buyable inventory before pending inventory.</p>
-            </div>
-            <div>
-                <h3 class="font-semibold text-gray-900">Marketplace fee policy</h3>
-                <code class="block mt-1 rounded bg-gray-100 p-3 text-sm text-gray-800">GET /api/v2/fee_info</code>
-            </div>
-            <div>
-                <h3 class="font-semibold text-gray-900">Hosted HSD status</h3>
-                <code class="block mt-1 rounded bg-gray-100 p-3 text-sm text-gray-800">GET /api/v2/hsd/status</code>
-            </div>
-            <div>
-                <h3 class="font-semibold text-gray-900">Listing-scoped coin lookup</h3>
-                <code class="block mt-1 rounded bg-gray-100 p-3 text-sm text-gray-800">GET /api/v2/listings/&lt;name&gt;/coin</code>
-            </div>
-            <div>
-                <h3 class="font-semibold text-gray-900">Transaction status</h3>
-                <code class="block mt-1 rounded bg-gray-100 p-3 text-sm text-gray-800">GET /api/v2/tx/&lt;txHash&gt;/status</code>
-            </div>
-        </div>
-    </section>
-
-    <section class="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">For HSD Node Helpers</h2>
-        <p class="text-gray-700">
-            The project benefits from a fully synced mainnet HSD node that can answer public chain-data lookups for active listings.
-            We do not need wallet access, seeds, private keys, or custody.
-        </p>
-        <ul class="mt-4 list-disc pl-6 space-y-2 text-gray-700">
-            <li>Mainnet full node, not SPV</li>
-            <li>Prefer <code class="rounded bg-gray-100 px-1">--no-wallet</code></li>
-            <li>Backend-only API access with an API key</li>
-            <li>Critical endpoint: <code class="rounded bg-gray-100 px-1">GET /coin/&lt;txHash&gt;/&lt;index&gt;</code></li>
+    <section id="testing" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">6. Test before advertising support</h2>
+        <p class="mt-4 text-gray-700">Use isolated regtest wallets, fake names and fake HNS first. The <a class="text-indigo-700 underline" href="https://github.com/shadstone/learnhns-market/blob/main/docs/local-regtest.md">local Market sandbox guide</a> documents Docker setup and its limitations. All participants must use the same regtest chain; a proof from a different local chain will not work. Do not assume the public staging hostname is connected to your test node.</p>
+        <pre class="mt-4 overflow-x-auto rounded bg-gray-100 p-4 text-sm"><code># From the learnhns-market repository, with Docker available:
+docker compose -f compose.regtest.yaml up --build -d
+python3 scripts/check-regtest-sandbox.py
+# Local Market: http://127.0.0.1:18000</code></pre>
+        <p class="mt-3 text-gray-700">The smoke check verifies the sandbox infrastructure; it does not demonstrate a wallet purchase. Follow the sandbox guide for storage requirements and create a valid seller lock/proof on that same chain. Never use a production wallet profile, seed or real funds in regtest.</p>
+        <ul class="mt-5 list-disc pl-6 space-y-3 text-gray-700">
+            <li><strong>Happy path:</strong> import → verify → review price/fees → fill → confirmation → transfer maturity → FINALIZE → confirmed buyer ownership.</li>
+            <li><strong>Invalid offers:</strong> wrong network, altered signature/price/payee, mismatched name or locking script, future lock time, expired listing, missing fee address, and unsupported proof shape.</li>
+            <li><strong>Changing state:</strong> another buyer wins, seller cancels, name expires, or a chain reorg changes the current owner or maturity.</li>
+            <li><strong>Wallet failures:</strong> insufficient funds, user rejection, missing/old app, node unavailable, broadcast uncertainty, helper timeout, or failed Market notification. No duplicate payment on retry.</li>
+            <li><strong>Recovery:</strong> restart during the lockup, recover saved purchase state, finalize after maturity, and show separate broadcast, confirmed, sold and finalized states.</li>
         </ul>
-        <div class="mt-5 rounded-md border border-gray-200 bg-gray-50 p-4">
-            <h3 class="font-semibold text-gray-900 mb-2">Supported HSD backend styles</h3>
-            <ul class="list-disc pl-6 space-y-2 text-gray-700">
-                <li><code class="rounded bg-gray-100 px-1">raw</code>: direct HSD HTTP API, for example <code class="rounded bg-gray-100 px-1">/coin/&lt;txHash&gt;/&lt;index&gt;</code>.</li>
-                <li><code class="rounded bg-gray-100 px-1">firehsd</code>: Fire HSD wrapper API, for example <code class="rounded bg-gray-100 px-1">/api/v1/coin/&lt;txHash&gt;/&lt;index&gt;</code>.</li>
-            </ul>
+        <p class="mt-5 text-gray-700">Before a public “Buy with” button, agree on the exact wallet release and platform, retain reproducible test results, and complete a separately authorized low-value mainnet purchase through confirmed final ownership. This guide does not authorize spending real HNS or publishing test listings to production.</p>
+    </section>
+
+    <section id="partner-checklist" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">7. What each team supplies</h2>
+        <div class="mt-5 grid gap-6 sm:grid-cols-2">
+            <div><h3 class="text-lg font-semibold">Wallet team</h3><ul class="mt-3 list-disc pl-5 space-y-2 text-gray-700"><li>Supported version, operating systems and test build.</li><li>Shakedex proof verification, fill and script-FINALIZE support.</li><li>App-link, import or provider specification; errors and optional result format.</li><li>Chain-data/broadcast provider and light-client trust model.</li><li>Persistent recovery behavior and test evidence.</li></ul></div>
+            <div><h3 class="text-lg font-semibold">LearnHNS Market team</h3><ul class="mt-3 list-disc pl-5 space-y-2 text-gray-700"><li>Proof/API contract and reference code below.</li><li>Agreed test environment and example proofs.</li><li>Website adapter, installation guidance and error handling.</li><li>Chain-verified sale tracking and finalization guidance.</li><li>Version-specific compatibility wording after testing.</li></ul></div>
         </div>
+        <p class="mt-5 text-gray-700">For Namebase, the first decision is whether the request is for a wallet information link or a working purchase handoff. If Shakedex is already implemented, share the supported release and interface. Otherwise, use this guide to scope the wallet-side work before enabling a Market button.</p>
+    </section>
+
+    <section id="references" class="bg-white rounded-lg border border-gray-200 shadow-sm p-6 sm:p-8">
+        <h2 class="text-2xl font-bold">Reference implementations and further reading</h2>
+        <ul class="mt-5 list-disc pl-6 space-y-3 text-indigo-700">
+            <li><a class="underline" href="https://github.com/shadstone/learnhns-market/blob/main/app/templates/listing.html">Market website adapters: Bob app link and extension capability check</a></li>
+            <li><a class="underline" href="https://github.com/shadstone/learnhns-market/blob/main/app/blueprints/api.py">Market API implementation and chain-verified status handling</a></li>
+            <li><a class="underline" href="https://github.com/shadstoneofficial/shakedex/blob/master/src/swapProof.js">Shakedex proof verification and transaction construction</a></li>
+            <li><a class="underline" href="https://github.com/shadstoneofficial/shakedex/blob/master/src/swapService.js">Shakedex fill and finalization reference</a></li>
+            <li><a class="underline" href="https://github.com/shadstone/learnhns-market/blob/main/docs/listing-integrity-security.md">Listing validation and state integrity</a></li>
+            <li><a class="underline" href="https://github.com/shadstone/learnhns-market/blob/main/docs/listing-renewal.md">Seller integration: signed listing renewal</a></li>
+            <li><a class="underline" href="https://shakedex.org/docs#compatible-wallets">Compatible-wallet directory and attributed verification evidence</a></li>
+            <li><a class="underline" href="{{ url_for('main.how_it_works') }}">How Market works for buyers and sellers</a></li>
+        </ul>
+        <p class="mt-5 text-gray-700">Reference links follow their repositories’ current branches. Record the commit revisions used for an integration and test against the actual deployed Market contract. Namebase compatibility remains unverified until the agreed checks pass.</p>
     </section>
 </div>
 {% endblock %}
